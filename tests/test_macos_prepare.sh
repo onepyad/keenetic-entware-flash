@@ -71,7 +71,7 @@ test_preparation() (
         prepare_usb_macos >/dev/null
         expected=$'partition\nunmount\nswap\next4\nfiles\nmbr\nsync\neject'
         if [ "${BUSY_VOLUME:-0}" = 1 ]; then
-            expected=$'partition\nunmount\nforce-unmount\nswap\next4\nfiles\nmbr\nsync\neject'
+            expected=$'partition\nunmount\nunmount\nforce-unmount\nswap\next4\nfiles\nmbr\nsync\neject'
         fi
         [ "$(cat "$TRACE")" = "$expected" ] || fail "incorrect preparation order"
         [ -f "$INSTALLER_SOURCE/aarch64-installer.tar.gz" ] || fail "user installer was removed"

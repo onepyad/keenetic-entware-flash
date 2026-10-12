@@ -42,6 +42,34 @@ validate_macos_native_layout() {
     fi
 }
 
+unmount_prepared_usb_macos() {
+    local output line pid reported actual
+    if output=$(LC_ALL=C diskutil unmountDisk "$DISK" 2>&1); then
+        printf '%s\n' "$output"
+        return 0
+    fi
+    printf '%s\n' "$output" >&2
+    # Only act on a dissenter named by diskutil for the selected, newly erased
+    # disk. The parent PID (often launchd) is deliberately not considered.
+    while IFS= read -r line; do
+        if [[ "$line" =~ dissented[[:space:]]by[[:space:]]PID[[:space:]]([0-9]+)[[:space:]]\((.*)\)$ ]]; then
+            pid="${BASH_REMATCH[1]}"
+            reported="${BASH_REMATCH[2]}"
+            [ "$pid" -gt 1 ] && [ "$pid" != "$$" ] && [ "$pid" != "$PPID" ] || continue
+            actual=$(ps -p "$pid" -o comm= 2>/dev/null) || continue
+            # Reject a vanished/reused PID or an unexpected process identity.
+            [ "$actual" = "$reported" ] || continue
+            printf '>>> Флешку %s удерживает PID %s (%s). Завершаем процесс (TERM).\n' \
+                "$DISK" "$pid" "$actual" >&2
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done <<< "$output"
+    sleep 1
+    if diskutil unmountDisk "$DISK"; then return 0; fi
+    echo ">>> Повторяем отключение выбранной флешки с force." >&2
+    diskutil unmountDisk force "$DISK"
+}
+
 prepare_usb_macos() {
     local raw_disk swap_part data_part swap_size filename commands readback
     raw_disk="${DISK/disk/rdisk}"
@@ -53,10 +81,7 @@ prepare_usb_macos() {
         'MS-DOS FAT32' OPKG R || return 1
     # These volumes were just erased after explicit user confirmation. Spotlight
     # can hold the temporary FAT volumes open; force only this selected disk.
-    if ! diskutil unmountDisk "$DISK"; then
-        echo ">>> macOS удерживает новый раздел: повторяем отключение выбранной флешки." >&2
-        diskutil unmountDisk force "$DISK" || return 1
-    fi
+    unmount_prepared_usb_macos || return 1
     swap_size=$(diskutil info -plist "${DISK}s1" | plutil -extract TotalSize raw -) || return 1
     [ "$swap_size" = "$MAC_SWAP_BYTES" ] || {
         echo "ERROR: Actual swap partition size differs from requested size." >&2; return 1;
