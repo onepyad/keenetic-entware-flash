@@ -11,22 +11,20 @@ Insert a USB flash drive and run:
 ```bash
 git clone https://github.com/onepyad/keenetic-entware-flash.git
 cd keenetic-entware-flash
-sudo ./run.sh
+# macOS: install/check Homebrew, Python and e2fsprogs first
+if [ "$(uname -s)" = Darwin ]; then bash setup-macos.sh; fi
+sudo bash run.sh
 ```
 
-The script will show available USB devices:
+Disconnect all other external drives when prompted. The only remaining USB drive is selected automatically:
 
 ```
-============================================
- Select USB device
-============================================
-
-  1) /dev/disk4 — USB DISK 2.0 (15.5 GB)
-  2) /dev/disk6 — MassStorageClass (64.9 GB)
-
-  0) Cancel
-
-Select device [1-2]:
+Отключите все остальные флешки и внешние диски.
+Оставьте подключённой только флешку, которую хотите подготовить.
+Когда готово, нажмите Enter (или введите 0 для отмены):
+  Media Name: USB DISK 2.0
+  Disk Size: 16.0 GB (...)
+Автоматически выбрана флешка: /dev/disk4
 ```
 
 Docker is checked before disk selection. Linux can flash using native tools; Docker mode pulls an image or builds it locally.
@@ -37,7 +35,7 @@ What you need depends on which script you run:
 
 | Script | macOS | Linux |
 |--------|-------|-------|
-| `run.sh` (flash a drive) | Docker Desktop + Python 3 | Docker **or** `parted`, `e2fsprogs`, `util-linux`, `kpartx` |
+| `run.sh` (flash a drive) | Homebrew + Python + e2fsprogs **or** Docker Desktop + Python | Docker **or** `parted`, `e2fsprogs`, `util-linux`, `kpartx` |
 | `clone.sh backup` | built-in (`dd`, `diskutil`) | built-in (`dd`, `lsblk`) |
 | `clone.sh restore` (with auto-expand) | Docker Desktop | `parted`, `e2fsprogs`, `util-linux`, `kpartx`, `gdisk` |
 | `clone.sh restore --no-expand` | built-in | built-in |
@@ -107,10 +105,8 @@ sudo apt install parted e2fsprogs util-linux kpartx curl
 sudo ./run.sh --backend native --model NC-1913 /dev/sdX
 ```
 
-Automatic macOS flashing needs Docker Desktop and Python 3:
-`brew install --cask docker`, `brew install python`, then start Docker Desktop.
-Preflight happens before disk selection. Without Docker, use download-only mode
-and the manual macOS workflow below. `--backend docker` never switches backends.
+macOS supports native preparation: `bash setup-macos.sh`, then
+`sudo bash run.sh --backend native`. Dependencies are checked before disk selection. `--backend docker` never switches backends.
 
 The selected archive is downloaded over HTTPS from `bin.entware.net` and checked
 before formatting. Network errors or invalid archives stop preparation.
@@ -121,7 +117,7 @@ On macOS, confirmation precedes the destructive capacity test as well as flashin
 | Variable | Description | Default |
 |---|---|---|
 | `MODEL` | KN-xxxx / NC-xxxx | — |
-| `BACKEND` | auto / docker / native (Linux) | `auto` |
+| `BACKEND` | auto / docker / native (Linux/macOS) | `auto` |
 | `INSTALLER_LANGUAGE` | ru / en | `ru` |
 | `ARCH` | Router architecture: `mipsel`, `mips`, `aarch64` | Model/platform selection |
 | `SWAP_SIZE` | Swap partition size in MB | `1024` |
@@ -153,59 +149,33 @@ docker run --rm -it --privileged \
   ghcr.io/onepyad/keenetic-entware-flash:main
 ```
 
-## macOS: Manual Preparation (without Docker)
-
-If you prefer not to install Docker, you can prepare the USB drive directly on macOS.
-
-### Prerequisites
+## Native macOS preparation without Docker
 
 ```bash
-brew install e2fsprogs
+bash setup-macos.sh
+sudo bash run.sh --backend native
+# Reuse an archive you have already downloaded:
+sudo bash run.sh --backend native --installer-dir ./installers
 ```
 
-### Steps
+Homebrew is not bundled with macOS. The setup script checks it, uses the official
+installer if missing, and installs Git, Python and e2fsprogs. Run setup without sudo.
+Before detection, disconnect all other USB drives and external disks. Exactly one
+candidate is selected and described; zero or multiple candidates require a rescan.
+The script still requires confirmation before erasing the drive.
 
-1. Insert a USB flash drive and find its disk identifier:
+Native mode creates MBR with an initialized **1 GiB Linux swap** partition and
+an **OPKG ext4** partition using the remaining space, with the installer and swap
+startup script copied from the Mac. No additional SMB copy is needed.
+This mode supports 512-byte disk sectors and disks up to 2 TiB. `SWAP_SIZE` is in
+MiB (default 1024), and `SWAP_PAGE_SIZE` is the router's Linux page size (default
+4096, independent of the Mac CPU). See [macOS testing instructions](TESTING.ru.md).
+
+Read-only USB detection without Docker or root:
 
 ```bash
-diskutil list external physical
+DISK="$(bash run.sh --detect-usb)"
 ```
-
-Look for your drive (e.g., `/dev/disk4`). **Double-check the disk number** — selecting the wrong disk will destroy data.
-
-2. Create an MBR partition table with two partitions (replace `disk4` with your disk):
-
-```bash
-sudo diskutil partitionDisk /dev/disk4 MBRFormat \
-  "MS-DOS FAT32" "SWAP" 1024M \
-  "MS-DOS FAT32" "OPKG" R
-```
-
-This creates:
-- **Partition 1** — 1 GB for SWAP
-- **Partition 2** — remaining space for Entware data
-
-3. Reformat partition 2 as ext4:
-
-```bash
-diskutil unmountDisk /dev/disk4
-sudo $(brew --prefix e2fsprogs)/sbin/mkfs.ext4 -O ^metadata_csum,^64bit -L OPKG -F /dev/disk4s2
-```
-
-4. Eject the drive:
-
-```bash
-diskutil eject /dev/disk4
-```
-
-5. Insert the USB drive into your Keenetic router and follow the [After Flashing](#after-flashing) steps.
-
-> **Note:** The SWAP partition will be initialized automatically by the router's init script (`mkswap` + `swapon`). The router will download Entware when the OPKG component is enabled — an internet connection is required.
-
-### Customization
-
-- **Swap size**: change `1024M` to your preferred size (e.g., `512M`, `2048M`)
-- **GPT instead of MBR**: replace `MBRFormat` with `GPTFormat`
 
 ## How It Works
 
@@ -300,7 +270,7 @@ ssh root@192.168.1.1 -p 22
 
 Swap significantly improves stability when running multiple Entware packages. SWAP **does not activate automatically** without an init script — after each router reboot `free -m` will show `Swap: 0`.
 
-The auto-start script is already saved to the USB drive during flashing. It auto-detects the SWAP partition (by finding the OPKG label on the adjacent partition) and runs `mkswap` + `swapon`.
+The auto-start script is already saved to the USB drive during flashing. It identifies a Linux swap partition labeled SWAP and runs `swapon`. It never formats a device; repeated start is safe.
 
 Connect to Entware via SSH and run:
 
@@ -330,43 +300,7 @@ The `Swap` line should show values (e.g., `Swap: 1023 MB`).
 
 ---
 
-<details>
-<summary>If the script is missing from /opt/scripts/ — create it manually</summary>
 
-Copy and paste this entire command (it creates the script file):
-
-```bash
-cat > /opt/etc/init.d/S01swap <<'SWAP'
-#!/bin/sh
-find_swap() {
-    if command -v blkid >/dev/null 2>&1; then
-        OPKG=$(blkid -L OPKG 2>/dev/null)
-        [ -n "$OPKG" ] && DEV=$(echo "$OPKG" | sed 's/2$/1/') && [ -b "$DEV" ] && echo "$DEV" && return
-    fi
-    for d in /dev/sda1 /dev/sdb1 /dev/sdc1; do [ -b "$d" ] && echo "$d" && return; done
-    return 1
-}
-case "$1" in
-  start)
-    DEV=$(find_swap) || { echo "SWAP not found"; exit 1; }
-    swapon "$DEV" 2>/dev/null || { mkswap -L SWAP "$DEV" >/dev/null 2>&1; swapon "$DEV"; }
-    echo "SWAP started on $DEV"
-    ;;
-  stop) swapoff -a 2>/dev/null ;;
-  restart) "$0" stop; sleep 1; "$0" start ;;
-  status) cat /proc/swaps; free -m | grep -i swap ;;
-  *) echo "Usage: $0 {start|stop|restart|status}" ;;
-esac
-SWAP
-```
-
-Make the script executable:
-
-```bash
-chmod +x /opt/etc/init.d/S01swap
-```
-
-</details>
 
 ---
 

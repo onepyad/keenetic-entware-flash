@@ -117,7 +117,7 @@ require_tools() {
 validate_disk_size() {
     local bytes
     bytes=$(blockdev --getsize64 "$DEVICE") || return 1
-    if [ "$bytes" -lt "$(((SWAP_SIZE + 64) * 1048576))" ]; then
+    if [ "$bytes" -lt "$(((SWAP_SIZE + 68) * 1048576))" ]; then
         echo "ERROR: Disk is too small for SWAP_SIZE=$SWAP_SIZE and at least 64 MiB of data." >&2
         return 1
     fi
@@ -228,10 +228,11 @@ partition_disk() {
     parted -s "$DEVICE" mklabel "$label_type"
 
     echo ">>> Creating swap partition (${SWAP_SIZE} MB)..."
-    parted -s "$DEVICE" mkpart primary linux-swap 1MiB "${SWAP_SIZE}MiB"
+    local swap_end=$((SWAP_SIZE + 1))
+    parted -s "$DEVICE" mkpart primary linux-swap 1MiB "${swap_end}MiB"
 
     echo ">>> Creating ext4 partition (remaining space)..."
-    parted -s "$DEVICE" mkpart primary ext4 "${SWAP_SIZE}MiB" 100%
+    parted -s "$DEVICE" mkpart primary ext4 "${swap_end}MiB" 100%
 
     # Wait for partition devices to appear
     sleep 1

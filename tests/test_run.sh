@@ -55,7 +55,7 @@ test_no_docker_macos() (
     }
     uname() { echo Darwin; }
     select_disk_macos() { touch "$TMP_TEST/macos-device-touched"; return 1; }
-    if main --model NC-1013 >"$TMP_TEST/macos.log" 2>&1; then fail "missing macOS Docker accepted"; fi
+    if main --backend docker --model NC-1013 >"$TMP_TEST/macos.log" 2>&1; then fail "missing macOS Docker accepted"; fi
     [ ! -e "$TMP_TEST/macos-device-touched" ] || fail "macOS device accessed without Docker"
     grep -q 'brew install --cask docker' "$TMP_TEST/macos.log" || fail "Docker installation guidance missing"
     grep -q -- '--download-installer' "$TMP_TEST/macos.log" || fail "download alternative missing"
@@ -121,6 +121,24 @@ test_native_dispatch() (
     cleanup
 )
 
+test_native_macos_dispatch() (
+    RUN_SH_TESTING=1 source "$REPO_DIR/run.sh"
+    trap - EXIT
+    SKIP_ENTWARE=1 FORCE=1
+    uname() { echo Darwin; }
+    id() { echo 0; }
+    choose_backend() { BACKEND=native; }
+    validate_target() { return 0; }
+    validate_macos_native_layout() { touch "$TMP_TEST/native-macos-validated"; }
+    prepare_usb_macos() {
+        [ -e "$TMP_TEST/native-macos-validated" ] || fail "native macOS layout not validated"
+        touch "$TMP_TEST/native-macos-dispatched"
+    }
+    docker() { fail "native macOS invoked Docker"; }
+    main --backend native --model NC-1812 /dev/disk7
+    [ -e "$TMP_TEST/native-macos-dispatched" ] || fail "native macOS was not dispatched"
+)
+
 test_no_docker_linux
 test_unavailable_daemon
 test_missing_dependencies_before_device_selection
@@ -129,4 +147,5 @@ test_download_without_docker_or_root
 test_invalid_partition_parameters
 test_declining_prevents_macos_write
 test_native_dispatch
+test_native_macos_dispatch
 echo "launcher preflight tests passed"

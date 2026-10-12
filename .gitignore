@@ -10,3 +10,5 @@
 .keenetic-installers-*
 .keenetic-flash-*
 installers/
+__pycache__/
+*.pyc

@@ -11,22 +11,20 @@
 ```bash
 git clone https://github.com/onepyad/keenetic-entware-flash.git
 cd keenetic-entware-flash
-sudo ./run.sh
+# macOS: install/check Homebrew, Python and e2fsprogs first
+if [ "$(uname -s)" = Darwin ]; then bash setup-macos.sh; fi
+sudo bash run.sh
 ```
 
 脚本会显示可用的 USB 设备：
 
 ```
-============================================
- Select USB device
-============================================
-
-  1) /dev/disk4 — USB DISK 2.0 (15.5 GB)
-  2) /dev/disk6 — MassStorageClass (64.9 GB)
-
-  0) Cancel
-
-Select device [1-2]:
+Отключите все остальные флешки и внешние диски.
+Оставьте подключённой только флешку, которую хотите подготовить.
+Когда готово, нажмите Enter (или введите 0 для отмены):
+  Media Name: USB DISK 2.0
+  Disk Size: 16.0 GB (...)
+Автоматически выбрана флешка: /dev/disk4
 ```
 
 选择磁盘之前先检查 Docker。Linux 可使用原生工具；Docker 模式自动下载或构建镜像。
@@ -37,7 +35,7 @@ Select device [1-2]:
 
 | 脚本 | macOS | Linux |
 |------|-------|-------|
-| `run.sh`（写入闪存盘） | Docker Desktop + Python 3 | Docker 或 `parted`、`e2fsprogs`、`util-linux`、`kpartx` |
+| `run.sh`（写入闪存盘） | Homebrew + Python + e2fsprogs 或 Docker Desktop + Python | Docker 或 `parted`、`e2fsprogs`、`util-linux`、`kpartx` |
 | `clone.sh backup` | 内置（`dd`、`diskutil`） | 内置（`dd`、`lsblk`） |
 | `clone.sh restore`（自动扩展） | Docker Desktop | `parted`、`e2fsprogs`、`util-linux`、`kpartx`、`gdisk` |
 | `clone.sh restore --no-expand` | 内置 | 内置 |
@@ -98,8 +96,8 @@ sudo apt install parted e2fsprogs util-linux kpartx curl
 sudo ./run.sh --backend native --model NC-1913 /dev/sdX
 ```
 
-Linux 在 Docker 不可用时自动使用系统工具。macOS 自动写入需要 Docker Desktop 和 Python 3；
-检查在选择磁盘之前进行。macOS 无 Docker 时可以下载安装包并使用下方手动流程。
+Linux 和 macOS 都支持原生模式。macOS 请先运行 `bash setup-macos.sh`。
+依赖检查在选择磁盘之前进行。
 安装包从 `bin.entware.net` 通过 HTTPS 下载，并在格式化之前检查。
 
 ## 参数
@@ -107,7 +105,7 @@ Linux 在 Docker 不可用时自动使用系统工具。macOS 自动写入需要
 | 变量 | 说明 | 默认值 |
 |---|---|---|
 | `MODEL` | KN-xxxx / NC-xxxx | — |
-| `BACKEND` | auto / docker / native (Linux) | `auto` |
+| `BACKEND` | auto / docker / native (Linux/macOS) | `auto` |
 | `INSTALLER_LANGUAGE` | ru / en | `ru` |
 | `ARCH` | 路由器架构：`mipsel`、`mips`、`aarch64` | 选择型号或平台 |
 | `SWAP_SIZE` | Swap 分区大小（MB） | `1024` |
@@ -139,59 +137,22 @@ docker run --rm -it --privileged \
   ghcr.io/onepyad/keenetic-entware-flash:main
 ```
 
-## macOS：手动准备（无需 Docker）
-
-如果您不想安装 Docker，可以直接在 macOS 上准备 USB 闪存盘。
-
-### 前提条件
+## macOS 原生准备（无需 Docker）
 
 ```bash
-brew install e2fsprogs
+bash setup-macos.sh
+sudo bash run.sh --backend native
+# 使用已下载的安装包
+sudo bash run.sh --backend native --installer-dir ./installers
 ```
 
-### 步骤
-
-1. 插入 USB 闪存盘并查找其磁盘标识符：
-
-```bash
-diskutil list external physical
-```
-
-找到您的闪存盘（例如 `/dev/disk4`）。**请仔细核对磁盘编号** — 选错磁盘将会导致数据丢失。
-
-2. 创建包含两个分区的 MBR 分区表（将 `disk4` 替换为您的磁盘）：
-
-```bash
-sudo diskutil partitionDisk /dev/disk4 MBRFormat \
-  "MS-DOS FAT32" "SWAP" 1024M \
-  "MS-DOS FAT32" "OPKG" R
-```
-
-这将创建：
-- **分区 1** — 1 GB 用于 SWAP
-- **分区 2** — 剩余空间用于 Entware 数据
-
-3. 将分区 2 重新格式化为 ext4：
-
-```bash
-diskutil unmountDisk /dev/disk4
-sudo $(brew --prefix e2fsprogs)/sbin/mkfs.ext4 -O ^metadata_csum,^64bit -L OPKG -F /dev/disk4s2
-```
-
-4. 弹出闪存盘：
-
-```bash
-diskutil eject /dev/disk4
-```
-
-5. 将 USB 闪存盘插入 Keenetic 路由器，然后按照[写入后的操作](#写入后的操作)部分的步骤操作。
-
-> **注意：** SWAP 分区将由路由器的 init 脚本自动初始化（`mkswap` + `swapon`）。路由器会在启用 OPKG 组件时自动下载 Entware — 需要互联网连接。
-
-### 自定义选项
-
-- **Swap 大小**：将 `1024M` 更改为所需大小（例如 `512M`、`2048M`）
-- **使用 GPT 替代 MBR**：将 `MBRFormat` 替换为 `GPTFormat`
+macOS 不预装 Homebrew。安装脚本先检查 Homebrew，缺失时使用官方安装器，
+然后安装 Git、Python 和 e2fsprogs。安装依赖时不要使用 sudo。
+断开其他外部磁盘后，脚本只会自动选择唯一的候选设备，并在擦除前要求确认。
+创建两个 MBR 分区：初始化的 1 GiB Linux SWAP 和剩余空间的 OPKG ext4。
+安装包和 SWAP 脚本直接写入 ext4，无需通过 SMB 另行复制。
+支持 512 字节磁盘扇区和最大 2 TiB 的磁盘。SWAP_SIZE 默认 1024 MiB。
+SWAP_PAGE_SIZE 是路由器的 Linux 页面大小，默认 4096，与 Mac 的 CPU 无关。
 
 ## 工作原理
 
@@ -286,7 +247,7 @@ ssh root@192.168.1.1 -p 22
 
 启用 Swap 可以显著提高运行多个 Entware 软件包时的稳定性。如果没有 init 脚本，SWAP **不会自动激活** — 每次路由器重启后 `free -m` 将显示 `Swap: 0`。
 
-自动启动脚本已在写入 USB 时保存到闪存盘。它会自动检测 SWAP 分区（通过查找相邻分区的 OPKG 卷标）并执行 `mkswap` + `swapon`。
+自动启动脚本已在写入 USB 时保存到闪存盘。它会自动检测 SWAP 分区（通过查找相邻分区的 OPKG 卷标）并执行 `swapon`，不会格式化分区。
 
 通过 SSH 连接 Entware 并执行：
 
@@ -316,43 +277,7 @@ free -m
 
 ---
 
-<details>
-<summary>如果 /opt/scripts/ 中没有该脚本 — 请手动创建</summary>
 
-复制并粘贴以下整条命令（它会创建脚本文件）：
-
-```bash
-cat > /opt/etc/init.d/S01swap <<'SWAP'
-#!/bin/sh
-find_swap() {
-    if command -v blkid >/dev/null 2>&1; then
-        OPKG=$(blkid -L OPKG 2>/dev/null)
-        [ -n "$OPKG" ] && DEV=$(echo "$OPKG" | sed 's/2$/1/') && [ -b "$DEV" ] && echo "$DEV" && return
-    fi
-    for d in /dev/sda1 /dev/sdb1 /dev/sdc1; do [ -b "$d" ] && echo "$d" && return; done
-    return 1
-}
-case "$1" in
-  start)
-    DEV=$(find_swap) || { echo "SWAP not found"; exit 1; }
-    swapon "$DEV" 2>/dev/null || { mkswap -L SWAP "$DEV" >/dev/null 2>&1; swapon "$DEV"; }
-    echo "SWAP started on $DEV"
-    ;;
-  stop) swapoff -a 2>/dev/null ;;
-  restart) "$0" stop; sleep 1; "$0" start ;;
-  status) cat /proc/swaps; free -m | grep -i swap ;;
-  *) echo "Usage: $0 {start|stop|restart|status}" ;;
-esac
-SWAP
-```
-
-使脚本可执行：
-
-```bash
-chmod +x /opt/etc/init.d/S01swap
-```
-
-</details>
 
 ---
 

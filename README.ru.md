@@ -13,22 +13,20 @@
 ```bash
 git clone https://github.com/onepyad/keenetic-entware-flash.git
 cd keenetic-entware-flash
-sudo ./run.sh
+# macOS: install/check Homebrew, Python and e2fsprogs first
+if [ "$(uname -s)" = Darwin ]; then bash setup-macos.sh; fi
+sudo bash run.sh
 ```
 
-Скрипт покажет доступные USB-устройства:
+Скрипт попросит отключить остальные накопители и выберет единственную флешку:
 
 ```
-============================================
- Select USB device
-============================================
-
-  1) /dev/disk4 — USB DISK 2.0 (15.5 GB)
-  2) /dev/disk6 — MassStorageClass (64.9 GB)
-
-  0) Cancel
-
-Select device [1-2]:
+Отключите все остальные флешки и внешние диски.
+Оставьте подключённой только флешку, которую хотите подготовить.
+Когда готово, нажмите Enter (или введите 0 для отмены):
+  Media Name: USB DISK 2.0
+  Disk Size: 16.0 GB (...)
+Автоматически выбрана флешка: /dev/disk4
 ```
 
 Docker проверяется до выбора накопителя. На Linux доступна запись без Docker; в режиме Docker образ скачивается или собирается локально.
@@ -39,7 +37,7 @@ Docker проверяется до выбора накопителя. На Linux
 
 | Скрипт | macOS | Linux |
 |--------|-------|-------|
-| `run.sh` (запись флешки) | Docker Desktop + Python 3 | Docker **или** `parted`, `e2fsprogs`, `util-linux`, `kpartx` |
+| `run.sh` (запись флешки) | Homebrew + Python + e2fsprogs **или** Docker Desktop + Python | Docker **или** `parted`, `e2fsprogs`, `util-linux`, `kpartx` |
 | `clone.sh backup` | встроено (`dd`, `diskutil`) | встроено (`dd`, `lsblk`) |
 | `clone.sh restore` (с авто-расширением) | Docker Desktop | `parted`, `e2fsprogs`, `util-linux`, `kpartx`, `gdisk` |
 | `clone.sh restore --no-expand` | встроено | встроено |
@@ -111,10 +109,8 @@ sudo apt install parted e2fsprogs util-linux kpartx curl
 sudo ./run.sh --backend native --model NC-1913 /dev/sdX
 ```
 
-На macOS автоматическая запись требует работающего Docker Desktop и Python 3:
-`brew install --cask docker`, `brew install python`, затем запустите Docker Desktop.
-Проверка выполняется до выбора диска. Без Docker можно скачать установщик
-через `--download-installer` и воспользоваться ручной подготовкой ниже.
+На macOS доступна нативная подготовка без Docker: сначала `bash setup-macos.sh`,
+затем `sudo bash run.sh --backend native`. Зависимости проверяются до выбора диска.
 `--backend docker` требует Docker и не переключается на другой режим.
 
 Архив скачивается по HTTPS с `bin.entware.net` и проверяется до форматирования.
@@ -126,7 +122,7 @@ sudo ./run.sh --backend native --model NC-1913 /dev/sdX
 | Переменная | Описание | По умолчанию |
 |---|---|---|
 | `MODEL` | KN-xxxx / NC-xxxx | — |
-| `BACKEND` | auto / docker / native (Linux) | `auto` |
+| `BACKEND` | auto / docker / native (Linux/macOS) | `auto` |
 | `INSTALLER_LANGUAGE` | ru / en | `ru` |
 | `ARCH` | Архитектура роутера: `mipsel`, `mips`, `aarch64` | Выбор модели/платформы |
 | `SWAP_SIZE` | Размер swap-раздела в МБ | `1024` |
@@ -158,69 +154,65 @@ docker run --rm -it --privileged \
   ghcr.io/onepyad/keenetic-entware-flash:main
 ```
 
-## macOS: Ручная подготовка (без Docker)
+## macOS без Docker: подготовка целиком
 
-Если вы не хотите устанавливать Docker, можно подготовить флешку напрямую в macOS.
-
-### Требования
+Homebrew не входит в стандартную macOS. Если вы уже скачали репозиторий:
 
 ```bash
-brew install e2fsprogs
+bash setup-macos.sh
+sudo bash run.sh --backend native
 ```
 
-### Шаги
-
-1. Вставьте USB-флешку и найдите её идентификатор:
+`setup-macos.sh` проверит Homebrew, при необходимости запустит официальный
+установщик, затем установит Git, Python и e2fsprogs. Запускайте его без sudo.
+Для первого запуска до скачивания репозитория:
 
 ```bash
-diskutil list external physical
+SETUP_FILE="$(mktemp -t keenetic-setup)"
+curl -fL https://raw.githubusercontent.com/onepyad/keenetic-entware-flash/main/setup-macos.sh -o "$SETUP_FILE"
+bash "$SETUP_FILE"
+rm -f "$SETUP_FILE"
+git clone https://github.com/onepyad/keenetic-entware-flash.git
+cd keenetic-entware-flash
+sudo bash run.sh --backend native
 ```
 
-Найдите вашу флешку (например, `/dev/disk4`). **Перепроверьте номер диска** — выбор неправильного диска уничтожит данные.
+Скрипт попросит отключить остальные флешки и внешние диски, затем получить
+актуальный список устройств. Единственный накопитель выбирается автоматически,
+с показом названия и размера. При нуле или нескольких устройствах поиск
+повторяется; первый диск из списка не выбирается. Перед записью требуется `yes`.
 
-2. Создайте таблицу разделов MBR с двумя разделами (замените `disk4` на ваш диск):
+Создаются два раздела MBR: **1 ГиБ Linux SWAP** (по умолчанию) и **OPKG ext4**
+на оставшемся месте. SWAP инициализируется, установщик и S01swap записываются
+на ext4 с Mac. Дополнительное копирование по SMB не требуется.
+
+Если установщик уже скачан:
 
 ```bash
-sudo diskutil partitionDisk /dev/disk4 MBRFormat \
-  "MS-DOS FAT32" "SWAP" 1024M \
-  "MS-DOS FAT32" "OPKG" R
+sudo bash run.sh --backend native --installer-dir ./installers
 ```
 
-Это создаст:
-- **Раздел 1** — 1 ГБ для SWAP
-- **Раздел 2** — оставшееся место для данных Entware
+Размер SWAP задаётся в МиБ: `sudo SWAP_SIZE=2048 bash run.sh --backend native`.
+Этот нативный режим поддерживает MBR, накопители до 2 ТиБ с секторами 512 байт.
+Размер страницы Linux SWAP по умолчанию 4096 байт; для роутера с другим размером
+страницы задайте `SWAP_PAGE_SIZE`, например `sudo SWAP_PAGE_SIZE=16384 bash run.sh --backend native`.
+Размер страницы Mac не используется. Реальная активация проверяется на роутере.
 
-3. Переформатируйте раздел 2 в ext4:
+Для получения пути без root и записи на устройство:
 
 ```bash
-diskutil unmountDisk /dev/disk4
-sudo $(brew --prefix e2fsprogs)/sbin/mkfs.ext4 -O ^metadata_csum,^64bit -L OPKG -F /dev/disk4s2
+DISK="$(bash run.sh --detect-usb)"
 ```
-
-4. Извлеките флешку:
-
-```bash
-diskutil eject /dev/disk4
-```
-
-5. Вставьте флешку в Keenetic роутер и следуйте шагам из раздела [После записи](#после-записи).
-
-> **Примечание:** SWAP-раздел будет автоматически инициализирован init-скриптом на роутере (`mkswap` + `swapon`). Скачайте установщик через `./run.sh --model KN-xxxx --download-installer` и скопируйте его в папку `install` раздела OPKG по SMB/FTP. Установите компонент OPKG и выберите накопитель в его настройках.
-
-### Настройки
-
-- **Размер swap**: замените `1024M` на нужный размер (например, `512M`, `2048M`)
-- **GPT вместо MBR**: замените `MBRFormat` на `GPTFormat`
 
 ## Как это работает
 
 1. `run.sh` предлагает выбрать модель или платформу и проверяет зависимости
-2. Предлагает выбрать USB-устройство и скачивает официальный установщик
-3. На Linux использует системные утилиты или Docker; на macOS создаёт временный образ для Docker
-4. После подтверждения создаёт таблицу разделов MBR/GPT:
-   - **Раздел 1** — SWAP
+2. После отключения других дисков автоматически выбирает единственную флешку и скачивает установщик
+3. На Linux использует системные утилиты или Docker; на macOS использует Homebrew/e2fsprogs либо временный образ для Docker
+4. После подтверждения создаёт разметку MBR (для Docker/Linux также доступна GPT):
+   - **Раздел 1** — Linux SWAP размером 1 ГиБ по умолчанию
    - **Раздел 2** — EXT4 (метка: OPKG) с установщиком Entware
-5. На macOS записывает образ на флешку (пропуская пустые блоки для скорости)
+5. Записывает установщик и SWAP-скрипт; в Docker-режиме macOS записывает готовый образ
 6. Готово — вставляйте флешку в роутер
 
 ## После записи
@@ -305,7 +297,7 @@ ssh root@192.168.1.1 -p 22
 
 Swap значительно повышает стабильность при работе нескольких пакетов Entware. SWAP **не активируется автоматически** без init-скрипта — после каждой перезагрузки роутера `free -m` покажет `Swap: 0`.
 
-Скрипт автозапуска уже записан на флешку при прошивке. Он сам определяет SWAP раздел (по метке OPKG на соседнем разделе) и выполняет `mkswap` + `swapon`.
+Скрипт автозапуска уже записан на флешку при прошивке. Он определяет раздел Linux SWAP по метке SWAP и выполняет `swapon`. Раздел уже инициализирован; скрипт не форматирует его и безопасно обрабатывает повторный запуск.
 
 Подключитесь к Entware по SSH и выполните:
 
@@ -315,7 +307,7 @@ Swap значительно повышает стабильность при р�
 cp /opt/scripts/S01swap /opt/etc/init.d/S01swap && chmod +x /opt/etc/init.d/S01swap
 ```
 
-Запустите — скрипт сам найдёт раздел, инициализирует и активирует SWAP:
+Запустите — скрипт найдёт уже инициализированный раздел и активирует SWAP:
 
 ```bash
 /opt/etc/init.d/S01swap start
@@ -335,43 +327,7 @@ free -m
 
 ---
 
-<details>
-<summary>Если скрипта нет в /opt/scripts/ — создайте вручную</summary>
 
-Скопируйте и вставьте эту команду целиком (она создаст файл скрипта):
-
-```bash
-cat > /opt/etc/init.d/S01swap <<'SWAP'
-#!/bin/sh
-find_swap() {
-    if command -v blkid >/dev/null 2>&1; then
-        OPKG=$(blkid -L OPKG 2>/dev/null)
-        [ -n "$OPKG" ] && DEV=$(echo "$OPKG" | sed 's/2$/1/') && [ -b "$DEV" ] && echo "$DEV" && return
-    fi
-    for d in /dev/sda1 /dev/sdb1 /dev/sdc1; do [ -b "$d" ] && echo "$d" && return; done
-    return 1
-}
-case "$1" in
-  start)
-    DEV=$(find_swap) || { echo "SWAP not found"; exit 1; }
-    swapon "$DEV" 2>/dev/null || { mkswap -L SWAP "$DEV" >/dev/null 2>&1; swapon "$DEV"; }
-    echo "SWAP started on $DEV"
-    ;;
-  stop) swapoff -a 2>/dev/null ;;
-  restart) "$0" stop; sleep 1; "$0" start ;;
-  status) cat /proc/swaps; free -m | grep -i swap ;;
-  *) echo "Usage: $0 {start|stop|restart|status}" ;;
-esac
-SWAP
-```
-
-Сделайте скрипт исполняемым:
-
-```bash
-chmod +x /opt/etc/init.d/S01swap
-```
-
-</details>
 
 ---
 

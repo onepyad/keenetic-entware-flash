@@ -85,9 +85,18 @@ sudo ./run.sh --backend native --model NC-1812 /dev/sdX
 `--backend auto` uses Docker when the CLI and daemon work, otherwise it uses
 native Linux tools. Missing tools produce installation instructions before disk
 selection. `--backend docker` never silently switches to native mode.
-macOS automatic flashing requires Docker Desktop and Python 3; it checks both
-before selecting a disk. Download-only mode works without them. Manual macOS
-partitioning remains documented in README.ru.md.
+macOS native preparation needs Homebrew, Python and e2fsprogs. Run
+`bash setup-macos.sh` without sudo: missing Homebrew is installed using its
+official installer. Then use `sudo bash run.sh --backend native`.
+The script initializes a 1 GiB Linux swap partition and fills the remaining
+space with OPKG ext4, including the installer and swap startup script.
+No Docker or SMB copying is required. Native macOS currently supports MBR,
+512-byte disk sectors and disks <= 2 TiB. SWAP_PAGE_SIZE defaults to the router
+page size 4096; set it explicitly if the router uses another Linux page size.
+The Mac's page size is deliberately not used.
+USB detection first requests disconnecting other external drives. Exactly one
+remaining device is selected; zero or multiple devices require a rescan.
+`bash run.sh --detect-usb` is read-only and needs no root or Docker.
 
 The download can be copied to the `install` directory on an existing ext4
 partition through SMB/FTP. Enable the Open Package support component and select

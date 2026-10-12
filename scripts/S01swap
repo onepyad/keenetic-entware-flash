@@ -1,105 +1,46 @@
 #!/bin/sh
-#
-# SWAP auto-start script for Keenetic routers with Entware
-#
-# Installation:
-#   cp /opt/scripts/S01swap /opt/etc/init.d/S01swap
-#   chmod +x /opt/etc/init.d/S01swap
-#
-# Usage:
-#   /opt/etc/init.d/S01swap {start|stop|restart|status}
-#
-
+# Activate a preformatted Linux SWAP partition; never format a device here.
 ENABLED=yes
+SWAPS_FILE=${SWAPS_FILE:-/proc/swaps}
 
-# Find SWAP partition: OPKG is always on partition 2, SWAP is partition 1
-# of the same disk. blkid reliably shows OPKG label but often misses swap.
 find_swap_device() {
-    # Method 1: find disk with LABEL="OPKG" on partition 2, use partition 1
-    if command -v blkid >/dev/null 2>&1; then
-        OPKG_DEV=$(blkid -L OPKG 2>/dev/null)
-        if [ -n "$OPKG_DEV" ]; then
-            # /dev/sda2 -> /dev/sda1
-            SWAP_DEV=$(echo "$OPKG_DEV" | sed 's/2$/1/')
-            if [ -b "$SWAP_DEV" ]; then
-                echo "$SWAP_DEV"
-                return 0
-            fi
-        fi
-    fi
-
-    # Method 2: try blkid SWAP label directly
-    if command -v blkid >/dev/null 2>&1; then
-        SWAP_DEV=$(blkid -L SWAP 2>/dev/null)
-        if [ -n "$SWAP_DEV" ]; then
-            echo "$SWAP_DEV"
-            return 0
-        fi
-    fi
-
-    # Method 3: fallback to first partition of sd devices
-    for dev in /dev/sda1 /dev/sdb1 /dev/sdc1; do
-        if [ -b "$dev" ]; then
-            echo "$dev"
-            return 0
-        fi
+    command -v blkid >/dev/null 2>&1 || { echo "blkid is required to identify SWAP" >&2; return 1; }
+    devices=$(blkid 2>/dev/null | awk '/LABEL="SWAP"/ && /TYPE="swap"/ {sub(/:$/, "", $1); print $1}')
+    count=0
+    candidate=""
+    for device in $devices; do
+        count=$((count + 1))
+        candidate=$device
     done
+    [ "$count" = 1 ] || { echo "Expected one Linux swap partition labeled SWAP; found $count" >&2; return 1; }
+    [ -b "$candidate" ] || { echo "Not a block device: $candidate" >&2; return 1; }
+    printf '%s\n' "$candidate"
+}
 
-    return 1
+is_active() {
+    awk -v device="$1" '$1 == device {found=1} END {exit !found}' "$SWAPS_FILE"
 }
 
 start() {
-    if [ "$ENABLED" != "yes" ]; then
-        echo "SWAP is disabled (ENABLED=$ENABLED)"
-        return 0
-    fi
-
-    SWAP_DEVICE=$(find_swap_device)
-    if [ -z "$SWAP_DEVICE" ]; then
-        echo "SWAP device not found"
-        return 1
-    fi
-
-    # Try swapon directly, if it fails — initialize with mkswap first
-    if ! swapon "$SWAP_DEVICE" 2>/dev/null; then
-        echo "Initializing SWAP on $SWAP_DEVICE..."
-        mkswap -L SWAP "$SWAP_DEVICE" >/dev/null 2>&1
-        swapon "$SWAP_DEVICE" 2>/dev/null || true
-    fi
-    echo "SWAP started on $SWAP_DEVICE"
+    [ "$ENABLED" = yes ] || { echo "SWAP is disabled"; return 0; }
+    device=$(find_swap_device) || return 1
+    if is_active "$device"; then echo "SWAP already active on $device"; return 0; fi
+    swapon "$device" || return 1
+    echo "SWAP started on $device"
 }
 
 stop() {
-    echo "Stopping SWAP..."
-    swapoff -a 2>/dev/null || true
+    device=$(find_swap_device) || return 1
+    if is_active "$device"; then swapoff "$device" || return 1; fi
+    echo "SWAP stopped on $device"
 }
 
-status() {
-    echo "SWAP status:"
-    cat /proc/swaps
-    echo ""
-    free -m | grep -i swap
-}
-
-case "$1" in
-    start)
-        start
-        ;;
-    stop)
-        stop
-        ;;
-    restart)
-        stop
-        sleep 1
-        start
-        ;;
-    status)
-        status
-        ;;
-    *)
-        echo "Usage: $0 {start|stop|restart|status}"
-        exit 1
-        ;;
-esac
-
-exit 0
+if [ "${SWAP_SCRIPT_TESTING:-0}" != 1 ]; then
+    case "${1:-}" in
+        start) start ;;
+        stop) stop ;;
+        restart) stop && start ;;
+        status) cat "$SWAPS_FILE"; free -m ;;
+        *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+    esac
+fi

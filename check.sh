@@ -610,8 +610,9 @@ if [ "$MODE" = "entware" ]; then
                     parsed=$(python3 -c "
 import sys
 h=bytes.fromhex('$hdr_bytes')
-ver=int.from_bytes(h[0:4],'little')
-lp =int.from_bytes(h[4:8],'little')
+byteorder = 'big' if int.from_bytes(h[0:4], 'big') == 1 else 'little'
+ver=int.from_bytes(h[0:4],byteorder)
+lp =int.from_bytes(h[4:8],byteorder)
 print(f'{ver} {lp}')" 2>/dev/null || true)
                     if [ -n "$parsed" ]; then
                         ver=$(echo "$parsed" | awk '{print $1}')

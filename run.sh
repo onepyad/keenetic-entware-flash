@@ -7,11 +7,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/entware.sh"
+source "$SCRIPT_DIR/lib/usb.sh"
+source "$SCRIPT_DIR/lib/macos.sh"
 REMOTE_IMAGE="${REMOTE_IMAGE:-ghcr.io/onepyad/keenetic-entware-flash:main}"
 LOCAL_IMAGE="keenetic-entware-flash"
 IMAGE=""
 TMP_IMG=""
 INSTALLER_TMP=""
+INSTALLER_SOURCE=""
 NATIVE_MOUNT=""
 
 show_help() {
@@ -21,139 +24,31 @@ Keenetic Entware Flash — one-command USB preparation
 Usage:
   sudo ./run.sh [--model KN-xxxx/NC-xxxx | --arch ARCH] [/dev/diskN | /dev/sdX]
   ./run.sh --list-platforms
+  ./run.sh --detect-usb
   ./run.sh --model KN-1811 --download-installer [directory]
 
 Options:
   --model KN/NC-xxxx      Exact router model (MODEL env also accepted)
   --arch ARCH             mipsel, mips or aarch64; never the PC architecture
   --installer-language    ru (default) or en
-  --backend MODE          auto (default), docker or native (Linux only)
+  --backend MODE          auto (default), docker or native (Linux/macOS)
+  --installer-dir DIR    Use an already downloaded, validated installer
   --download-installer    Download only; no Docker, root or disk required
   --list-platforms       Show verified models and official download links
+  --detect-usb           Detect the only attached external USB; print its path, no writes
   -h, --help             Show this help
 
 Environment: MODEL, ARCH, INSTALLER_LANGUAGE, BACKEND, SWAP_SIZE,
 PARTITION_TABLE, SKIP_ENTWARE, FORCE. Native Linux needs parted, e2fsprogs,
-util-linux and kpartx. macOS flashing needs a running Docker Desktop.
+util-linux and kpartx. Native macOS needs Python + e2fsprogs: bash setup-macos.sh.
 
 HELP
     exit 0
 }
 
-# ============================================================================
-# Interactive device selection (macOS)
-# ============================================================================
-select_disk_macos() {
-    local disks=()
-    local names=()
-    local sizes=()
-
-    while IFS= read -r disk_id; do
-        [ -z "$disk_id" ] && continue
-        local info
-        info=$(diskutil info "$disk_id" 2>/dev/null) || continue
-
-        local name size
-        name=$(echo "$info" | grep "Media Name:" | sed 's/.*Media Name: *//')
-        size=$(echo "$info" | grep "Disk Size:" | sed 's/.*Disk Size: *//' | sed 's/ (.*//')
-
-        [ -z "$name" ] && name="(unknown)"
-        [ -z "$size" ] && size="(unknown)"
-
-        disks+=("$disk_id")
-        names+=("$name")
-        sizes+=("$size")
-    done < <(diskutil list external physical 2>/dev/null | grep "^/dev/" | awk '{print $1}' | sed 's/:$//')
-
-    if [ ${#disks[@]} -eq 0 ]; then
-        echo "ERROR: No external USB devices found."
-        echo "Insert a USB flash drive and try again."
-        exit 1
-    fi
-
-    echo "============================================"
-    echo " Select USB device"
-    echo "============================================"
-    echo ""
-
-    local i
-    for i in "${!disks[@]}"; do
-        printf "  %d) %s — %s (%s)\n" "$((i + 1))" "${disks[$i]}" "${names[$i]}" "${sizes[$i]}"
-    done
-
-    echo ""
-    echo "  0) Cancel"
-    echo ""
-
-    local choice
-    while true; do
-        read -r -p "Select device [1-${#disks[@]}]: " choice
-        if [ "$choice" = "0" ]; then
-            echo "Aborted."
-            exit 0
-        fi
-        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#disks[@]} ]; then
-            DISK="${disks[$((choice - 1))]}"
-            return
-        fi
-        echo "Invalid choice. Try again."
-    done
-}
-
-# ============================================================================
-# Interactive device selection (Linux)
-# ============================================================================
-select_disk_linux() {
-    local disks=()
-    local descs=()
-
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        local dev size model
-        dev=$(echo "$line" | awk '{print $1}')
-        size=$(echo "$line" | awk '{print $4}')
-        model=$(echo "$line" | awk '{for(i=7;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/ *$//')
-
-        [ -z "$model" ] && model="(unknown)"
-
-        disks+=("/dev/$dev")
-        descs+=("$size — $model")
-    done < <(lsblk -dno NAME,TYPE,RM,SIZE,TRAN,SUBSYSTEMS,MODEL 2>/dev/null | awk '$2=="disk" && $3=="1"')
-
-    if [ ${#disks[@]} -eq 0 ]; then
-        echo "ERROR: No removable USB devices found."
-        echo "Insert a USB flash drive and try again."
-        exit 1
-    fi
-
-    echo "============================================"
-    echo " Select USB device"
-    echo "============================================"
-    echo ""
-
-    local i
-    for i in "${!disks[@]}"; do
-        printf "  %d) %s — %s\n" "$((i + 1))" "${disks[$i]}" "${descs[$i]}"
-    done
-
-    echo ""
-    echo "  0) Cancel"
-    echo ""
-
-    local choice
-    while true; do
-        read -r -p "Select device [1-${#disks[@]}]: " choice
-        if [ "$choice" = "0" ]; then
-            echo "Aborted."
-            exit 0
-        fi
-        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#disks[@]} ]; then
-            DISK="${disks[$((choice - 1))]}"
-            return
-        fi
-        echo "Invalid choice. Try again."
-    done
-}
+# Automatic selection is allowed only when exactly one candidate remains.
+select_disk_macos() { auto_select_usb Darwin; }
+select_disk_linux() { auto_select_usb Linux; }
 
 cleanup() {
     if [ -n "$TMP_IMG" ] && [ -f "$TMP_IMG" ]; then
@@ -175,6 +70,14 @@ choose_backend() {
         BACKEND=docker
         return 0
     fi
+    if [ "$BACKEND" = auto ] && [ "$OS" = Darwin ]; then
+        echo ">>> Docker unavailable; using native macOS tools."
+        BACKEND=native
+    fi
+    if [ "$BACKEND" = native ] && [ "$OS" = Darwin ]; then
+        get_macos_native_tools || return 1
+        return 0
+    fi
     if [ "$BACKEND" = auto ] && [ "$OS" = Linux ]; then
         echo ">>> Docker unavailable; using native Linux tools."
         BACKEND=native
@@ -193,7 +96,7 @@ choose_backend() {
         return 0
     fi
     if [ "$BACKEND" = native ]; then
-        echo "ERROR: Automatic native flashing is available only on Linux." >&2
+        echo "ERROR: Automatic native flashing supports Linux and macOS." >&2
     elif command -v docker >/dev/null 2>&1; then
         echo "ERROR: Docker is installed, but its daemon is unavailable or access is denied." >&2
     else
@@ -241,7 +144,7 @@ confirm_target() {
 }
 
 main() {
-    local download_only=0 download_dir=installers
+    local download_only=0 download_dir=installers detect_only=0 installer_dir=""
     DISK=""
     BACKEND="${BACKEND:-auto}"
     INSTALLER_LANGUAGE="${INSTALLER_LANGUAGE:-ru}"
@@ -249,13 +152,15 @@ main() {
         case "$1" in
             -h|--help) show_help ;;
             --list-platforms) list_platforms; return 0 ;;
-            --model|--arch|--installer-language|--backend)
+            --detect-usb) detect_only=1; shift ;;
+            --model|--arch|--installer-language|--backend|--installer-dir)
                 [ "$#" -ge 2 ] || { echo "ERROR: $1 requires a value." >&2; return 1; }
                 case "$1" in
                     --model) MODEL="$2" ;;
                     --arch) ARCH="$2" ;;
                     --installer-language) INSTALLER_LANGUAGE="$2" ;;
                     --backend) BACKEND="$2" ;;
+                    --installer-dir) installer_dir="$2" ;;
                 esac
                 shift 2
                 ;;
@@ -272,6 +177,14 @@ main() {
             *) echo "ERROR: Unknown argument: $1" >&2; return 1 ;;
         esac
     done
+    if [ "$detect_only" = 1 ]; then
+        if [ "$download_only" = 1 ] || [ -n "$DISK" ]; then
+            echo "ERROR: --detect-usb cannot be combined with a device or download-only mode." >&2; return 1
+        fi
+        auto_select_usb "$(uname -s)" || return $?
+        printf '%s\n' "$DISK"
+        return 0
+    fi
     if [ "$download_only" = 1 ] && [ -n "$DISK" ]; then
         echo "ERROR: Download-only mode does not take a device." >&2; return 1
     fi
@@ -293,11 +206,18 @@ main() {
     if [ "$(id -u)" -ne 0 ]; then
         echo "ERROR: Flashing requires root. Use sudo; download-only mode does not." >&2; return 1
     fi
-    if [ "$OS" = Darwin ] && ! command -v python3 >/dev/null 2>&1; then
+    if [ "$OS" = Darwin ] && [ "$BACKEND" = docker ] && ! command -v python3 >/dev/null 2>&1; then
         echo "ERROR: Python 3 is required for macOS image creation and writing. Install: brew install python" >&2; return 1
     fi
     if [ -z "$DISK" ]; then
-        if [ "$OS" = Darwin ]; then select_disk_macos; else select_disk_linux; fi
+        local selection_rc=0
+        if [ "$OS" = Darwin ]; then
+            select_disk_macos || selection_rc=$?
+        else
+            select_disk_linux || selection_rc=$?
+        fi
+        [ "$selection_rc" = 2 ] && return 0
+        [ "$selection_rc" = 0 ] || return "$selection_rc"
     fi
     validate_target || return 1
     # Shared validation runs before downloads, confirmation and any disk writes.
@@ -306,20 +226,37 @@ main() {
         source "$SCRIPT_DIR/entrypoint.sh"
         validate_configuration
     ) || return 1
+    if [ "$OS" = Darwin ] && [ "$BACKEND" = native ]; then
+        validate_macos_native_layout || return 1
+    fi
     if [ "${SKIP_ENTWARE:-0}" != 1 ]; then
-        INSTALLER_TMP=$(mktemp -d "$SCRIPT_DIR/.keenetic-installers-XXXXXX")
-        download_installer "$ARCH" "$INSTALLER_LANGUAGE" "$INSTALLER_TMP" || return 1
-        chmod 755 "$INSTALLER_TMP"
-        chmod 644 "$INSTALLER_TMP/$(installer_filename "$ARCH" "$INSTALLER_LANGUAGE")"
+        local filename
+        filename=$(installer_filename "$ARCH" "$INSTALLER_LANGUAGE") || return 1
+        if [ -n "$installer_dir" ]; then
+            INSTALLER_SOURCE=$(cd "$installer_dir" && pwd) || return 1
+            [ -s "$INSTALLER_SOURCE/$filename" ] && tar -tzf "$INSTALLER_SOURCE/$filename" >/dev/null || {
+                echo "ERROR: Valid installer not found: $installer_dir/$filename" >&2; return 1;
+            }
+        else
+            INSTALLER_TMP=$(mktemp -d "$SCRIPT_DIR/.keenetic-installers-XXXXXX")
+            download_installer "$ARCH" "$INSTALLER_LANGUAGE" "$INSTALLER_TMP" || return 1
+            chmod 755 "$INSTALLER_TMP"
+            chmod 644 "$INSTALLER_TMP/$filename"
+            INSTALLER_SOURCE="$INSTALLER_TMP"
+        fi
     fi
     local rc=0
     confirm_target || rc=$?
     [ "$rc" = 2 ] && return 0
     [ "$rc" = 0 ] || return "$rc"
+    if [ "$BACKEND" = native ] && [ "$OS" = Darwin ]; then
+        prepare_usb_macos
+        return $?
+    fi
     if [ "$BACKEND" = native ]; then
         NATIVE_MOUNT=$(mktemp -d)
         TARGET="$DISK" MOUNT_POINT="$NATIVE_MOUNT" SWAP_SCRIPT="$SCRIPT_DIR/scripts/S01swap" \
-            INSTALLER_DIR="$INSTALLER_TMP" FORCE=1 bash "$SCRIPT_DIR/entrypoint.sh"
+            INSTALLER_DIR="$INSTALLER_SOURCE" FORCE=1 bash "$SCRIPT_DIR/entrypoint.sh"
         return $?
     fi
 
@@ -361,8 +298,8 @@ DOCKER_ENV+=( --entrypoint /bin/bash
     -v "$SCRIPT_DIR/entrypoint.sh:/opt/keenetic/entrypoint.sh:ro"
     -v "$SCRIPT_DIR/lib:/opt/keenetic/lib:ro"
     -v "$SCRIPT_DIR/scripts:/opt/scripts:ro" )
-if [ -n "$INSTALLER_TMP" ]; then
-    DOCKER_ENV+=( -v "$INSTALLER_TMP:/opt/entware-installers:ro" )
+if [ -n "$INSTALLER_SOURCE" ]; then
+    DOCKER_ENV+=( -v "$INSTALLER_SOURCE:/opt/entware-installers:ro" )
 fi
 
 # ============================================================================
