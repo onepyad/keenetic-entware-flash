@@ -9,7 +9,7 @@ DISK=""
 DD_PID=""
 OS="$(uname -s)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REMOTE_IMAGE="ghcr.io/maxxxam/keenetic-entware-flash:main"
+REMOTE_IMAGE="${REMOTE_IMAGE:-ghcr.io/onepyad/keenetic-entware-flash:main}"
 LOCAL_IMAGE="keenetic-entware-flash"
 TMP_FILES=()
 DECOMPRESSED_IMAGE=""
@@ -417,6 +417,11 @@ get_docker_image() {
     if ! command -v docker >/dev/null 2>&1; then
         echo "ERROR: Docker is required to expand ext4 images on macOS." >&2
         echo "Install Docker Desktop or run restore with --no-expand." >&2
+        exit 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        echo "ERROR: Docker daemon is unavailable or access is denied. Start Docker Desktop and check docker info." >&2
+        echo "Alternatively, use restore with --no-expand." >&2
         exit 1
     fi
 

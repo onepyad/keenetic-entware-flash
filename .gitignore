@@ -6,3 +6,7 @@
 # USB backup images
 *.img
 *.img.gz
+
+.keenetic-installers-*
+.keenetic-flash-*
+installers/

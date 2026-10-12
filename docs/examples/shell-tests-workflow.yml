@@ -1,0 +1,18 @@
+# To enable CI, copy this file to .github/workflows/tests.yml.
+name: Shell tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check shell syntax
+        run: |
+          for script in run.sh entrypoint.sh clone.sh check.sh install-docker.sh lib/entware.sh tests/*.sh; do
+            bash -n "$script"
+          done
+      - name: Run tests without touching devices
+        run: |
+          bash tests/test_clone.sh
+          bash tests/test_platforms.sh
+          bash tests/test_run.sh

@@ -1,4 +1,4 @@
-# Keenetic Entware Flash
+# Keenetic / Netcraze Entware Flash
 
 **Prepare a USB flash drive for Entware on Keenetic routers — with a single command.**
 
@@ -9,7 +9,7 @@
 Insert a USB flash drive and run:
 
 ```bash
-git clone https://github.com/MaxXxaM/keenetic-entware-flash.git
+git clone https://github.com/onepyad/keenetic-entware-flash.git
 cd keenetic-entware-flash
 sudo ./run.sh
 ```
@@ -29,7 +29,7 @@ The script will show available USB devices:
 Select device [1-2]:
 ```
 
-The Docker image is pulled automatically. If the registry is unavailable, it builds locally.
+Docker is checked before disk selection. Linux can flash using native tools; Docker mode pulls an image or builds it locally.
 
 ## Requirements
 
@@ -37,7 +37,7 @@ What you need depends on which script you run:
 
 | Script | macOS | Linux |
 |--------|-------|-------|
-| `run.sh` (flash a drive) | Docker Desktop | Docker |
+| `run.sh` (flash a drive) | Docker Desktop + Python 3 | Docker **or** `parted`, `e2fsprogs`, `util-linux`, `kpartx` |
 | `clone.sh backup` | built-in (`dd`, `diskutil`) | built-in (`dd`, `lsblk`) |
 | `clone.sh restore` (with auto-expand) | Docker Desktop | `parted`, `e2fsprogs`, `util-linux`, `kpartx`, `gdisk` |
 | `clone.sh restore --no-expand` | built-in | built-in |
@@ -71,24 +71,59 @@ brew install ddrescue
 # Debian / Ubuntu (and most router hosts)
 sudo apt install docker.io parted e2fsprogs util-linux kpartx gdisk gddrescue
 
-# Docker is optional on Linux: clone.sh expands ext4 natively when parted,
-# e2fsprogs, util-linux and kpartx are present. Docker is only used as a
-# fallback / for run.sh.
+# Docker is optional on Linux: run.sh and clone.sh can use native system tools.
 ```
 
 ## Supported Models
 
-| Architecture | Models | `ARCH` |
-|---|---|---|
-| **MIPSEL** (default) | Keenetic Ultra, Giga, Viva, Extra, Air, City, Omni, Lite, Start, KN-1010–KN-2310 | `mipsel` |
-| **MIPS** | KN-2410, KN-2510, KN-2010, KN-3610 | `mips` |
-| **AARCH64** | Keenetic Peak, Titan, Hopper, KN-2710, KN-2810, KN-2910, KN-3510 | `aarch64` |
+Use the exact **KN-xxxx** (Keenetic) or **NC-xxxx** (Netcraze) model ID.
+The host CPU does not determine the router platform. See
+[verified models, official sources and download links](docs/platforms.md).
+
+| Platform | Keenetic examples | Verified Netcraze models |
+| --- | --- | --- |
+| `mipsel` | KN-1810, KN-3810, KN-1010/1011 | Viva NC-1913 |
+| `mips` | KN-2410, KN-2510, KN-2010, KN-2110, KN-3610 | No verified NC models in this list |
+| `aarch64` | KN-2710, KN-1811/1812, KN-1012, KN-3811/3812 | Giga NC-1012/1013, Ultra NC-1812, Hopper NC-3811, Hopper SE NC-3812, Hopper 4G+ NC-2312, Hopper DSL NC-3611, Hero 5G NC-4110, Titan SE NC-4210 |
+
+Launcher NC-1221 and Carrier NC-1721 support USB modems rather than USB
+storage/OPKG. Unknown IDs require you to verify their manual and specify `--arch`.
+
+```bash
+./run.sh --list-platforms
+sudo ./run.sh --model NC-1812 /dev/sdX
+# Download only: no root, Docker or disk access
+./run.sh --model NC-1013 --download-installer ./installers
+./run.sh --model KN-2410 --installer-language en --download-installer ./installers-en
+```
+
+### Without Docker
+
+Linux automatically falls back to native tools when Docker CLI or its daemon
+is unavailable. Select `--backend native` explicitly if preferred:
+
+```bash
+sudo apt install parted e2fsprogs util-linux kpartx curl
+sudo ./run.sh --backend native --model NC-1913 /dev/sdX
+```
+
+Automatic macOS flashing needs Docker Desktop and Python 3:
+`brew install --cask docker`, `brew install python`, then start Docker Desktop.
+Preflight happens before disk selection. Without Docker, use download-only mode
+and the manual macOS workflow below. `--backend docker` never switches backends.
+
+The selected archive is downloaded over HTTPS from `bin.entware.net` and checked
+before formatting. Network errors or invalid archives stop preparation.
+On macOS, confirmation precedes the destructive capacity test as well as flashing.
 
 ## Parameters
 
 | Variable | Description | Default |
 |---|---|---|
-| `ARCH` | Architecture: `mipsel`, `mips`, `aarch64` | `mipsel` |
+| `MODEL` | KN-xxxx / NC-xxxx | — |
+| `BACKEND` | auto / docker / native (Linux) | `auto` |
+| `INSTALLER_LANGUAGE` | ru / en | `ru` |
+| `ARCH` | Router architecture: `mipsel`, `mips`, `aarch64` | Model/platform selection |
 | `SWAP_SIZE` | Swap partition size in MB | `1024` |
 | `PARTITION_TABLE` | Partition table: `mbr` or `gpt` | `mbr` |
 | `SKIP_ENTWARE` | Skip Entware installer (`1` to skip) | `0` |
@@ -115,7 +150,7 @@ sudo SKIP_ENTWARE=1 ./run.sh
 ```bash
 docker run --rm -it --privileged \
   -v /dev/sdb:/dev/target \
-  ghcr.io/maxxxam/keenetic-entware-flash:main
+  ghcr.io/onepyad/keenetic-entware-flash:main
 ```
 
 ## macOS: Manual Preparation (without Docker)
@@ -154,7 +189,7 @@ This creates:
 
 ```bash
 diskutil unmountDisk /dev/disk4
-sudo $(brew --prefix e2fsprogs)/sbin/mkfs.ext4 -O ^metadata_csum -L OPKG -F /dev/disk4s2
+sudo $(brew --prefix e2fsprogs)/sbin/mkfs.ext4 -O ^metadata_csum,^64bit -L OPKG -F /dev/disk4s2
 ```
 
 4. Eject the drive:
@@ -502,7 +537,7 @@ diskutil unmountDisk /dev/diskN
 
 **Docker Hub / GHCR unavailable** — the script will automatically build the image locally using accessible mirrors.
 
-**Entware installer failed to download** — the drive is still ready. The installer is embedded in the Docker image as a fallback. If that also fails, the router will download Entware itself when OPKG is enabled.
+**Entware installer failed to download** — preparation stops before formatting. Check access to `bin.entware.net` and retry. `SKIP_ENTWARE=1` explicitly allows preparation without an installer.
 
 ## License
 

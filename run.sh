@@ -5,25 +5,37 @@ set -euo pipefail
 # Keenetic Entware Flash — one-command launcher
 # ============================================================================
 
-REMOTE_IMAGE="ghcr.io/maxxxam/keenetic-entware-flash:main"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/entware.sh"
+REMOTE_IMAGE="${REMOTE_IMAGE:-ghcr.io/onepyad/keenetic-entware-flash:main}"
 LOCAL_IMAGE="keenetic-entware-flash"
 IMAGE=""
 TMP_IMG=""
+INSTALLER_TMP=""
+NATIVE_MOUNT=""
 
 show_help() {
     cat <<'HELP'
 Keenetic Entware Flash — one-command USB preparation
 
 Usage:
-  sudo ./run.sh                       # interactive device selection
-  sudo ./run.sh /dev/diskN            # macOS (direct)
-  sudo ./run.sh /dev/sdX              # Linux (direct)
-
-All extra env variables are forwarded to the container:
-  sudo ARCH=aarch64 SWAP_SIZE=512 ./run.sh
+  sudo ./run.sh [--model KN-xxxx/NC-xxxx | --arch ARCH] [/dev/diskN | /dev/sdX]
+  ./run.sh --list-platforms
+  ./run.sh --model KN-1811 --download-installer [directory]
 
 Options:
-  -h, --help    Show this help
+  --model KN/NC-xxxx      Exact router model (MODEL env also accepted)
+  --arch ARCH             mipsel, mips or aarch64; never the PC architecture
+  --installer-language    ru (default) or en
+  --backend MODE          auto (default), docker or native (Linux only)
+  --download-installer    Download only; no Docker, root or disk required
+  --list-platforms       Show verified models and official download links
+  -h, --help             Show this help
+
+Environment: MODEL, ARCH, INSTALLER_LANGUAGE, BACKEND, SWAP_SIZE,
+PARTITION_TABLE, SKIP_ENTWARE, FORCE. Native Linux needs parted, e2fsprogs,
+util-linux and kpartx. macOS flashing needs a running Docker Desktop.
+
 HELP
     exit 0
 }
@@ -148,51 +160,175 @@ cleanup() {
         echo ">>> Cleaning up temporary image..."
         rm -f "$TMP_IMG"
     fi
+    if [ -n "$INSTALLER_TMP" ] && [ -d "$INSTALLER_TMP" ]; then
+        rm -rf "$INSTALLER_TMP"
+    fi
+    if [ -n "$NATIVE_MOUNT" ] && [ -d "$NATIVE_MOUNT" ]; then
+        rmdir "$NATIVE_MOUNT" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 
-# ============================================================================
-# Args
-# ============================================================================
-if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
-    show_help
-fi
-
-if [ "$(id -u)" -ne 0 ]; then
-    echo "ERROR: This script requires root privileges."
-    echo "Usage: sudo $0 [/dev/diskN]"
-    exit 1
-fi
-
-DISK="${1:-}"
-
-if [ -z "$DISK" ]; then
-    # Interactive device selection
-    OS_DETECT="$(uname -s)"
-    if [ "$OS_DETECT" = "Darwin" ]; then
-        select_disk_macos
-    elif [ "$OS_DETECT" = "Linux" ]; then
-        select_disk_linux
-    else
-        echo "ERROR: Unsupported OS for interactive selection."
-        echo "Please specify device: sudo $0 /dev/sdX"
-        exit 1
+choose_backend() {
+    case "$BACKEND" in auto|docker|native) ;; *) echo "ERROR: --backend must be auto, docker or native." >&2; return 1 ;; esac
+    if [ "$BACKEND" != native ] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        BACKEND=docker
+        return 0
     fi
-elif [ ! -e "$DISK" ]; then
-    echo "ERROR: Device $DISK not found."
-    echo "Run without arguments for interactive selection: sudo $0"
-    exit 1
-fi
+    if [ "$BACKEND" = auto ] && [ "$OS" = Linux ]; then
+        echo ">>> Docker unavailable; using native Linux tools."
+        BACKEND=native
+    fi
+    if [ "$BACKEND" = native ] && [ "$OS" = Linux ]; then
+        local cmd missing=""
+        for cmd in parted blockdev lsblk dd partprobe kpartx mkswap mkfs.ext4 mount umount sync; do
+            command -v "$cmd" >/dev/null 2>&1 || missing="$missing $cmd"
+        done
+        if [ -n "$missing" ]; then
+            echo "ERROR: Missing native Linux tools:$missing" >&2
+            echo "Debian/Ubuntu: sudo apt install parted e2fsprogs util-linux kpartx curl" >&2
+            echo "Or install Docker Engine: https://docs.docker.com/engine/install/" >&2
+            return 1
+        fi
+        return 0
+    fi
+    if [ "$BACKEND" = native ]; then
+        echo "ERROR: Automatic native flashing is available only on Linux." >&2
+    elif command -v docker >/dev/null 2>&1; then
+        echo "ERROR: Docker is installed, but its daemon is unavailable or access is denied." >&2
+    else
+        echo "ERROR: Docker is not installed." >&2
+    fi
+    if [ "$OS" = Darwin ]; then
+        echo "Install Docker Desktop: brew install --cask docker" >&2
+        echo "Then start Docker Desktop and wait until docker info succeeds." >&2
+    else
+        echo "Docker installation: https://docs.docker.com/engine/install/" >&2
+    fi
+    echo "Installer-only download requires no Docker: ./run.sh --arch $ARCH --download-installer" >&2
+    return 1
+}
+
+validate_target() {
+    if [ "$OS" = Linux ]; then
+        [ -b "$DISK" ] || { echo "ERROR: $DISK is not a block device." >&2; return 1; }
+        [ "$(lsblk -dnro TYPE "$DISK")" = disk ] || { echo "ERROR: Select a whole disk, not a partition." >&2; return 1; }
+        [ "$(lsblk -dnro RO "$DISK")" = 0 ] || { echo "ERROR: Device is read-only." >&2; return 1; }
+        local mounts
+        mounts=$(lsblk -nr -o MOUNTPOINT "$DISK") || return 1
+        if [ -n "$(printf '%s' "$mounts" | tr -d '[:space:]')" ]; then
+            echo "ERROR: $DISK has mounted partitions or active swap. Unmount them before flashing." >&2
+            return 1
+        fi
+    else
+        [[ "$DISK" =~ ^/dev/disk[0-9]+$ ]] || { echo "ERROR: Use a whole disk such as /dev/disk4." >&2; return 1; }
+        local whole internal
+        whole=$(diskutil info -plist "$DISK" | plutil -extract Whole raw -) || return 1
+        internal=$(diskutil info -plist "$DISK" | plutil -extract Internal raw -) || return 1
+        [ "$whole" = true ] && [ "$internal" = false ] || {
+            echo "ERROR: Select an external whole disk." >&2; return 1;
+        }
+    fi
+}
+
+confirm_target() {
+    echo "WARNING: ALL DATA on $DISK will be destroyed. Router platform: $ARCH."
+    if [ "${FORCE:-0}" != 1 ]; then
+        local answer
+        read -r -p "Type yes to continue: " answer || return 1
+        [ "$answer" = yes ] || { echo "Aborted."; return 2; }
+    fi
+}
+
+main() {
+    local download_only=0 download_dir=installers
+    DISK=""
+    BACKEND="${BACKEND:-auto}"
+    INSTALLER_LANGUAGE="${INSTALLER_LANGUAGE:-ru}"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -h|--help) show_help ;;
+            --list-platforms) list_platforms; return 0 ;;
+            --model|--arch|--installer-language|--backend)
+                [ "$#" -ge 2 ] || { echo "ERROR: $1 requires a value." >&2; return 1; }
+                case "$1" in
+                    --model) MODEL="$2" ;;
+                    --arch) ARCH="$2" ;;
+                    --installer-language) INSTALLER_LANGUAGE="$2" ;;
+                    --backend) BACKEND="$2" ;;
+                esac
+                shift 2
+                ;;
+            --download-installer)
+                download_only=1; shift
+                if [ "$#" -gt 0 ] && [[ "$1" != -* ]] && [[ "$1" != /dev/* ]]; then
+                    download_dir="$1"; shift
+                fi
+                ;;
+            /dev/*)
+                [ -z "$DISK" ] || { echo "ERROR: Only one target device is allowed." >&2; return 1; }
+                DISK="$1"; shift
+                ;;
+            *) echo "ERROR: Unknown argument: $1" >&2; return 1 ;;
+        esac
+    done
+    if [ "$download_only" = 1 ] && [ -n "$DISK" ]; then
+        echo "ERROR: Download-only mode does not take a device." >&2; return 1
+    fi
+    if [ "${SKIP_ENTWARE:-0}" = 1 ] && [ "$download_only" = 0 ] && [ -z "${ARCH:-}" ] && [ -z "${MODEL:-}" ]; then
+        ARCH=mipsel # Formatting only; no architecture-specific download.
+    else
+        local rc=0
+        select_platform || rc=$?
+        [ "$rc" = 2 ] && return 0
+        [ "$rc" = 0 ] || return "$rc"
+    fi
+    if [ "$download_only" = 1 ]; then
+        download_installer "$ARCH" "$INSTALLER_LANGUAGE" "$download_dir"
+        return $?
+    fi
+    OS="$(uname -s)"
+    case "$OS" in Linux|Darwin) ;; *) echo "ERROR: Flashing supports Linux and macOS. Use --download-installer on other hosts." >&2; return 1 ;; esac
+    choose_backend || return 1
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "ERROR: Flashing requires root. Use sudo; download-only mode does not." >&2; return 1
+    fi
+    if [ "$OS" = Darwin ] && ! command -v python3 >/dev/null 2>&1; then
+        echo "ERROR: Python 3 is required for macOS image creation and writing. Install: brew install python" >&2; return 1
+    fi
+    if [ -z "$DISK" ]; then
+        if [ "$OS" = Darwin ]; then select_disk_macos; else select_disk_linux; fi
+    fi
+    validate_target || return 1
+    # Shared validation runs before downloads, confirmation and any disk writes.
+    (
+        export ENTRYPOINT_SH_TESTING=1 SWAP_SCRIPT="$SCRIPT_DIR/scripts/S01swap"
+        source "$SCRIPT_DIR/entrypoint.sh"
+        validate_configuration
+    ) || return 1
+    if [ "${SKIP_ENTWARE:-0}" != 1 ]; then
+        INSTALLER_TMP=$(mktemp -d "$SCRIPT_DIR/.keenetic-installers-XXXXXX")
+        download_installer "$ARCH" "$INSTALLER_LANGUAGE" "$INSTALLER_TMP" || return 1
+        chmod 755 "$INSTALLER_TMP"
+        chmod 644 "$INSTALLER_TMP/$(installer_filename "$ARCH" "$INSTALLER_LANGUAGE")"
+    fi
+    local rc=0
+    confirm_target || rc=$?
+    [ "$rc" = 2 ] && return 0
+    [ "$rc" = 0 ] || return "$rc"
+    if [ "$BACKEND" = native ]; then
+        NATIVE_MOUNT=$(mktemp -d)
+        TARGET="$DISK" MOUNT_POINT="$NATIVE_MOUNT" SWAP_SCRIPT="$SCRIPT_DIR/scripts/S01swap" \
+            INSTALLER_DIR="$INSTALLER_TMP" FORCE=1 bash "$SCRIPT_DIR/entrypoint.sh"
+        return $?
+    fi
 
 # ============================================================================
 # Get Docker image: pull pre-built or build locally
 # ============================================================================
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# A locally built dev image always wins. Otherwise we always try to pull the
-# latest remote image rather than reusing a cached one: the fast "skip empty
-# blocks" write-back below is only safe with an image whose entrypoint formats
-# ext4 with uninit_bg, so a stale cached image must not be silently reused.
+# A local helper image wins. Otherwise pull the published image or build it.
+# The current entrypoint, platform library and swap script are bind-mounted.
 if docker image inspect "$LOCAL_IMAGE" >/dev/null 2>&1; then
     IMAGE="$LOCAL_IMAGE"
 else
@@ -200,7 +336,7 @@ else
     if docker pull --platform linux/amd64 "$REMOTE_IMAGE" 2>/dev/null; then
         IMAGE="$REMOTE_IMAGE"
     elif docker image inspect "$REMOTE_IMAGE" >/dev/null 2>&1; then
-        echo ">>> Pull failed — using cached image (set FULL_WRITE=1 if unsure it has uninit_bg)..."
+        echo ">>> Pull failed — using cached tools with the current local scripts..."
         IMAGE="$REMOTE_IMAGE"
     else
         echo ">>> Pull failed, building locally..."
@@ -213,31 +349,37 @@ else
     echo ""
 fi
 
-# Forward env variables to container
-DOCKER_ENV=""
-[ -n "${ARCH:-}" ]            && DOCKER_ENV="$DOCKER_ENV -e ARCH=$ARCH"
-[ -n "${SWAP_SIZE:-}" ]       && DOCKER_ENV="$DOCKER_ENV -e SWAP_SIZE=$SWAP_SIZE"
-[ -n "${PARTITION_TABLE:-}" ] && DOCKER_ENV="$DOCKER_ENV -e PARTITION_TABLE=$PARTITION_TABLE"
-[ -n "${SKIP_ENTWARE:-}" ]    && DOCKER_ENV="$DOCKER_ENV -e SKIP_ENTWARE=$SKIP_ENTWARE"
-[ -n "${FORCE:-}" ]           && DOCKER_ENV="$DOCKER_ENV -e FORCE=$FORCE"
+# Run the checked-out source even if the cached image contains older scripts.
+DOCKER_ENV=( -e "ARCH=$ARCH" -e "INSTALLER_LANGUAGE=$INSTALLER_LANGUAGE" -e FORCE=1 )
+DOCKER_TTY=( -i )
+if [ -t 0 ] && [ -t 1 ]; then DOCKER_TTY=( -it ); fi
+local name
+for name in SWAP_SIZE PARTITION_TABLE SKIP_ENTWARE; do
+    if [ -n "${!name:-}" ]; then DOCKER_ENV+=( -e "$name=${!name}" ); fi
+done
+DOCKER_ENV+=( --entrypoint /bin/bash
+    -v "$SCRIPT_DIR/entrypoint.sh:/opt/keenetic/entrypoint.sh:ro"
+    -v "$SCRIPT_DIR/lib:/opt/keenetic/lib:ro"
+    -v "$SCRIPT_DIR/scripts:/opt/scripts:ro" )
+if [ -n "$INSTALLER_TMP" ]; then
+    DOCKER_ENV+=( -v "$INSTALLER_TMP:/opt/entware-installers:ro" )
+fi
 
 # ============================================================================
 # OS detection & run
 # ============================================================================
-OS="$(uname -s)"
-
 if [ "$OS" = "Linux" ]; then
     # Linux: pass block device directly
     echo ">>> Linux detected — passing block device directly"
-    docker run --rm -it --privileged --platform linux/amd64 \
-        $DOCKER_ENV \
+    docker run --rm "${DOCKER_TTY[@]}" --privileged --platform linux/amd64 \
+        "${DOCKER_ENV[@]}" \
         -v "$DISK":/dev/target \
-        "$IMAGE"
+        "$IMAGE" /opt/keenetic/entrypoint.sh
 
 elif [ "$OS" = "Darwin" ]; then
     # macOS: disk image workflow
     RAW_DISK="${DISK/disk/rdisk}"
-    TMP_IMG="/tmp/keenetic-flash-$$.img"
+    TMP_IMG=$(mktemp "$SCRIPT_DIR/.keenetic-flash-XXXXXX")
 
     echo "============================================"
     echo " Keenetic Entware Flash — macOS"
@@ -251,6 +393,11 @@ elif [ "$OS" = "Darwin" ]; then
     echo ">>> Getting disk size..."
     DISK_SIZE=$(diskutil info -plist "$DISK" | plutil -extract TotalSize raw -)
     echo "    Size: $((DISK_SIZE / 1048576)) MB"
+    local swap_size="${SWAP_SIZE:-1024}"
+    if [ "$DISK_SIZE" -lt "$(((10#$swap_size + 64) * 1048576))" ]; then
+        echo "ERROR: Disk is too small for the requested swap and data partitions." >&2
+        return 1
+    fi
 
     # Step 1b: verify the card actually stores data across its claimed size.
     # Counterfeit / dead flash reports a huge size but silently drops writes
@@ -259,7 +406,7 @@ elif [ "$OS" = "Darwin" ]; then
     # that looks successful but leaves the router with no data partition.
     if [ "${SKIP_CAPACITY_CHECK:-0}" != "1" ]; then
         echo ">>> Verifying real capacity (writes test sectors across the disk)..."
-        diskutil unmountDisk force "$DISK" >/dev/null 2>&1 || true
+        diskutil unmountDisk force "$DISK" >/dev/null
         if ! python3 -c "
 import os, sys, struct, time
 rdev, total = sys.argv[1], int(sys.argv[2])
@@ -303,22 +450,21 @@ print('    OK: capacity verified across the full %.1f GB.' % (total / 1e9))
     fi
 
     echo ">>> Creating empty disk image..."
-    truncate -s "$DISK_SIZE" "$TMP_IMG"
+    python3 -c 'import sys; f = open(sys.argv[1], "wb"); f.truncate(int(sys.argv[2])); f.close()' "$TMP_IMG" "$DISK_SIZE"
     chmod 666 "$TMP_IMG"
 
     # Step 2: run container
     echo ""
     echo ">>> Running container..."
-    docker run --rm -it --privileged --platform linux/amd64 \
-        -e FORCE=1 \
-        $DOCKER_ENV \
+    docker run --rm "${DOCKER_TTY[@]}" --privileged --platform linux/amd64 \
+        "${DOCKER_ENV[@]}" \
         -v "$TMP_IMG":/dev/target \
-        "$IMAGE"
+        "$IMAGE" /opt/keenetic/entrypoint.sh
 
     # Step 3: write image back to USB
     echo ""
     echo ">>> Unmounting $DISK before writing..."
-    diskutil unmountDisk force "$DISK" 2>/dev/null || true
+    diskutil unmountDisk force "$DISK"
 
     TOTAL_GB=$(awk "BEGIN {printf \"%.1f\", $DISK_SIZE / 1073741824}")
 
@@ -467,4 +613,10 @@ print('    Done: wrote %s of real data; skipped %s of empty space (%s disk).' % 
 else
     echo "ERROR: Unsupported OS: $OS"
     exit 1
+fi
+
+}
+
+if [ "${RUN_SH_TESTING:-0}" != 1 ]; then
+    main "$@"
 fi

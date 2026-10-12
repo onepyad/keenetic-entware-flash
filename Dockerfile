@@ -19,16 +19,11 @@ RUN if [ -n "$APT_MIRROR" ]; then \
         util-linux \
     && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /opt/entware-installers && \
-    wget -q -O /opt/entware-installers/mipsel-installer.tar.gz \
-        https://bin.entware.net/mipselsf-k3.4/installer/mipsel-installer.tar.gz && \
-    wget -q -O /opt/entware-installers/mips-installer.tar.gz \
-        https://bin.entware.net/mipssf-k3.4/installer/mips-installer.tar.gz && \
-    wget -q -O /opt/entware-installers/aarch64-installer.tar.gz \
-        https://bin.entware.net/aarch64-k3.10/installer/aarch64-installer.tar.gz
+RUN mkdir -p /opt/entware-installers
 
-COPY entrypoint.sh /entrypoint.sh
+COPY entrypoint.sh /opt/keenetic/entrypoint.sh
+COPY lib/ /opt/keenetic/lib/
 COPY scripts/ /opt/scripts/
-RUN chmod +x /entrypoint.sh /opt/scripts/*
+RUN chmod +x /opt/keenetic/entrypoint.sh /opt/scripts/*
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/opt/keenetic/entrypoint.sh"]

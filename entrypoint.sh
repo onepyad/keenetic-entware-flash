@@ -5,40 +5,25 @@ set -euo pipefail
 # Keenetic Entware Flash — USB flash drive preparation for Keenetic Entware
 # ============================================================================
 
-TARGET="/dev/target"
-MOUNT_POINT="/mnt/usb"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/entware.sh
+source "${ENTWARE_LIB:-$SCRIPT_DIR/lib/entware.sh}"
+TARGET="${TARGET:-/dev/target}"
+MOUNT_POINT="${MOUNT_POINT:-/mnt/usb}"
+SWAP_SCRIPT="${SWAP_SCRIPT:-/opt/scripts/S01swap}"
+INSTALLER_DIR="${INSTALLER_DIR:-/opt/entware-installers}"
+MOUNTED=0
 LOOP_DEVICE=""
 CLEANUP_LOOP=0
 KPARTX_DEVICE=""
 
 # Defaults (overridable via env)
-ARCH="${ARCH:-mipsel}"
+ARCH="${ARCH:-}"
+INSTALLER_LANGUAGE="${INSTALLER_LANGUAGE:-ru}"
 SWAP_SIZE="${SWAP_SIZE:-1024}"
 PARTITION_TABLE="${PARTITION_TABLE:-mbr}"
 SKIP_ENTWARE="${SKIP_ENTWARE:-0}"
 FORCE="${FORCE:-0}"
-
-# ============================================================================
-# Architecture mapping
-# ============================================================================
-# MIPSEL: Keenetic Ultra, Giga, Viva, Extra, Air, City, Omni, Lite, Start
-#         KN-1010, KN-1110, KN-1210, KN-1310, KN-1410, KN-1510, KN-1610,
-#         KN-1710, KN-1810, KN-1910, KN-2110, KN-2310
-# MIPS:   KN-2410, KN-2510, KN-2010, KN-3610
-# AARCH64: Keenetic Peak, Titan, Hopper, KN-2710, KN-2810, KN-2910, KN-3510
-
-arch_to_path() {
-    case "$1" in
-        mipsel)  echo "mipselsf-k3.4" ;;
-        mips)    echo "mipssf-k3.4" ;;
-        aarch64) echo "aarch64-k3.10" ;;
-        *)
-            echo "ERROR: Unknown architecture '$1'"
-            echo "Supported: mipsel, mips, aarch64"
-            exit 1
-            ;;
-    esac
-}
 
 # ============================================================================
 # Help
@@ -63,16 +48,18 @@ Usage (macOS):
   sudo dd if=/tmp/usb.img of=/dev/rdiskN bs=1m
 
 Environment variables:
-  ARCH              Entware architecture: mipsel (default), mips, aarch64
+  MODEL             Exact model, e.g. KN-1811 (see run.sh --list-platforms)
+  ARCH              Router architecture: mipsel, mips, aarch64 (no default)
+  INSTALLER_LANGUAGE  ru (default) or en
   SWAP_SIZE         Swap partition size in MB (default: 1024)
   PARTITION_TABLE   Partition table type: mbr (default) or gpt
   SKIP_ENTWARE      Skip Entware download: 0 (default) or 1
   FORCE             Skip confirmation prompt: 0 (default) or 1
 
-Model → Architecture mapping:
-  MIPSEL   Keenetic Ultra, Giga, Viva, Extra, Air, City, Omni, Lite, Start
-  MIPS     KN-2410, KN-2510, KN-2010, KN-3610
-  AARCH64  Keenetic Peak, Titan, Hopper
+Examples of verified models:
+  MIPSEL   KN-1810, KN-3810
+  MIPS     KN-2410, KN-3610
+  AARCH64  KN-1811, KN-3811, KN-2710
 
 Examples:
   # Linux — direct block device
@@ -93,7 +80,9 @@ HELP
 # Cleanup on exit
 # ============================================================================
 cleanup() {
-    umount "$MOUNT_POINT" 2>/dev/null || true
+    if [ "$MOUNTED" = "1" ]; then
+        umount "$MOUNT_POINT" 2>/dev/null || true
+    fi
     if [ -n "$KPARTX_DEVICE" ]; then
         kpartx -dv "$KPARTX_DEVICE" 2>/dev/null || true
     fi
@@ -102,6 +91,37 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+validate_configuration() {
+    [[ "$SWAP_SIZE" =~ ^[0-9]+$ ]] && [ "${#SWAP_SIZE}" -le 7 ] && [ "$SWAP_SIZE" -ge 2 ] || {
+        echo "ERROR: SWAP_SIZE must be an integer >= 2 MiB." >&2; return 1;
+    }
+    SWAP_SIZE=$((10#$SWAP_SIZE))
+    case "$PARTITION_TABLE" in mbr|gpt) ;; *) echo "ERROR: PARTITION_TABLE must be mbr or gpt." >&2; return 1 ;; esac
+    case "$SKIP_ENTWARE:$FORCE" in 0:0|0:1|1:0|1:1) ;; *) echo "ERROR: SKIP_ENTWARE and FORCE must be 0 or 1." >&2; return 1 ;; esac
+    if [ "$SKIP_ENTWARE" = "1" ] && [ -z "$ARCH" ] && [ -z "${MODEL:-}" ]; then
+        ARCH=mipsel # Formatting only: no CPU-dependent files downloaded.
+    else
+        select_platform || return $?
+    fi
+    [ -f "$SWAP_SCRIPT" ] || { echo "ERROR: SWAP script not found: $SWAP_SCRIPT" >&2; return 1; }
+}
+
+require_tools() {
+    local cmd
+    for cmd in parted blockdev dd partprobe kpartx mkswap mkfs.ext4 mount umount sync tar losetup; do
+        command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: Required utility is missing: $cmd" >&2; return 1; }
+    done
+}
+
+validate_disk_size() {
+    local bytes
+    bytes=$(blockdev --getsize64 "$DEVICE") || return 1
+    if [ "$bytes" -lt "$(((SWAP_SIZE + 64) * 1048576))" ]; then
+        echo "ERROR: Disk is too small for SWAP_SIZE=$SWAP_SIZE and at least 64 MiB of data." >&2
+        return 1
+    fi
+}
 
 # ============================================================================
 # Device setup
@@ -297,57 +317,29 @@ install_entware() {
     echo ">>> Mounting ext4 partition..."
     mkdir -p "$MOUNT_POINT"
     mount "$part2" "$MOUNT_POINT"
+    MOUNTED=1
 
     # Download Entware installer
     if [ "$SKIP_ENTWARE" = "1" ]; then
         echo ">>> Skipping Entware download (SKIP_ENTWARE=1)."
     else
-        local filename="${ARCH}-installer.tar.gz"
-
-        local url_arch_dir
-        case "$ARCH" in
-            mipsel)  url_arch_dir="mipselsf-k3.4" ;;
-            mips)    url_arch_dir="mipssf-k3.4" ;;
-            aarch64) url_arch_dir="aarch64-k3.10" ;;
-        esac
-
-        local url="https://bin.entware.net/${url_arch_dir}/installer/${filename}"
-        local fallback="/opt/entware-installers/${filename}"
-
-        echo ">>> Creating install directory..."
+        local filename
+        filename=$(installer_filename "$ARCH" "$INSTALLER_LANGUAGE")
         mkdir -p "${MOUNT_POINT}/install"
-
-        echo ">>> Downloading Entware installer..."
-        echo "    URL: $url"
-
-        if wget -q --show-progress -O "${MOUNT_POINT}/install/${filename}" "$url" 2>&1 && \
-           [ -s "${MOUNT_POINT}/install/${filename}" ]; then
-            echo ">>> Entware installer downloaded successfully."
-        else
-            rm -f "${MOUNT_POINT}/install/${filename}"
-            if [ -s "$fallback" ]; then
-                echo ">>> Download failed, using built-in fallback..."
-                cp "$fallback" "${MOUNT_POINT}/install/${filename}"
-                echo ">>> Entware installer copied from fallback."
-            else
-                echo "WARNING: Failed to download Entware installer and no fallback available."
-                echo "URL: $url"
-                echo ""
-                echo "You can download it manually later and place it in the /install/ directory."
-                echo "Or enable OPKG in router settings — the router will install Entware itself."
-            fi
-        fi
+        # The archive has been validated before formatting.
+        cp "$INSTALLER_DIR/$filename" "${MOUNT_POINT}/install/${filename}"
     fi
 
     # Copy SWAP init script (always, regardless of SKIP_ENTWARE)
     echo ">>> Copying SWAP init script..."
     mkdir -p "${MOUNT_POINT}/scripts"
-    cp /opt/scripts/S01swap "${MOUNT_POINT}/scripts/S01swap"
+    cp "$SWAP_SCRIPT" "${MOUNT_POINT}/scripts/S01swap"
     chmod +x "${MOUNT_POINT}/scripts/S01swap"
     echo ">>> SWAP script saved to /scripts/S01swap on the USB drive."
 
     echo ">>> Unmounting..."
     umount "$MOUNT_POINT"
+    MOUNTED=0
 }
 
 # ============================================================================
@@ -381,12 +373,27 @@ main() {
         show_help
     fi
 
+    validate_configuration
+    require_tools
+    # Download and validate before formatting, including direct Docker usage.
+    if [ "$SKIP_ENTWARE" != "1" ]; then
+        local filename
+        filename=$(installer_filename "$ARCH" "$INSTALLER_LANGUAGE")
+        if [ ! -s "$INSTALLER_DIR/$filename" ]; then
+            download_installer "$ARCH" "$INSTALLER_LANGUAGE" "$INSTALLER_DIR"
+        fi
+        tar -tzf "$INSTALLER_DIR/$filename" >/dev/null
+    fi
     setup_device
+    validate_disk_size
     show_disk_info
     confirm
     partition_disk
     install_entware
+    sync
     show_success
 }
 
-main "$@"
+if [ "${ENTRYPOINT_SH_TESTING:-0}" != "1" ]; then
+    main "$@"
+fi

@@ -9,7 +9,7 @@
 插入 USB 闪存盘并执行：
 
 ```bash
-git clone https://github.com/MaxXxaM/keenetic-entware-flash.git
+git clone https://github.com/onepyad/keenetic-entware-flash.git
 cd keenetic-entware-flash
 sudo ./run.sh
 ```
@@ -29,7 +29,7 @@ sudo ./run.sh
 Select device [1-2]:
 ```
 
-Docker 镜像会自动下载。如果镜像仓库不可用，将在本地构建。
+选择磁盘之前先检查 Docker。Linux 可使用原生工具；Docker 模式自动下载或构建镜像。
 
 ## 系统要求
 
@@ -37,7 +37,7 @@ Docker 镜像会自动下载。如果镜像仓库不可用，将在本地构建�
 
 | 脚本 | macOS | Linux |
 |------|-------|-------|
-| `run.sh`（写入闪存盘） | Docker Desktop | Docker |
+| `run.sh`（写入闪存盘） | Docker Desktop + Python 3 | Docker 或 `parted`、`e2fsprogs`、`util-linux`、`kpartx` |
 | `clone.sh backup` | 内置（`dd`、`diskutil`） | 内置（`dd`、`lsblk`） |
 | `clone.sh restore`（自动扩展） | Docker Desktop | `parted`、`e2fsprogs`、`util-linux`、`kpartx`、`gdisk` |
 | `clone.sh restore --no-expand` | 内置 | 内置 |
@@ -70,23 +70,46 @@ brew install ddrescue
 # Debian / Ubuntu（以及大多数路由器主机）
 sudo apt install docker.io parted e2fsprogs util-linux kpartx gdisk gddrescue
 
-# 在 Linux 上 Docker 是可选的：当 parted、e2fsprogs、util-linux 和 kpartx 存在时，
-# clone.sh 会原生扩展 ext4。Docker 仅作为后备 / 供 run.sh 使用。
+# 在 Linux 上 Docker 是可选的：run.sh 和 clone.sh 可使用系统工具。
 ```
 
 ## 支持的型号
 
-| 架构 | 型号 | `ARCH` |
-|---|---|---|
-| **MIPSEL**（默认） | Keenetic Ultra, Giga, Viva, Extra, Air, City, Omni, Lite, Start, KN-1010–KN-2310 | `mipsel` |
-| **MIPS** | KN-2410, KN-2510, KN-2010, KN-3610 | `mips` |
-| **AARCH64** | Keenetic Peak, Titan, Hopper, KN-2710, KN-2810, KN-2910, KN-3510 | `aarch64` |
+使用精确型号 **KN-xxxx**（Keenetic）或 **NC-xxxx**（Netcraze），而不是电脑的 CPU 架构。
+完整的已验证型号、官方来源及下载链接见 [平台说明](docs/platforms.md)。
+
+| 架构 | Keenetic 示例 | Netcraze 示例 |
+| --- | --- | --- |
+| `mipsel` | KN-1810、KN-3810 | Viva NC-1913 |
+| `mips` | KN-2410、KN-2510、KN-2110 | 当前列表没有已验证的 NC 型号 |
+| `aarch64` | KN-2710、KN-1811、KN-3811 | NC-1012、NC-1013、NC-1812、NC-3811、NC-3812、NC-2312、NC-3611、NC-4110、NC-4210 |
+
+未知型号不会自动选择 mipsel。请先核实官方手册，再使用 `--arch`。
+Launcher NC-1221 和 Carrier NC-1721 的 USB 仅用于调制解调器，不适用 USB OPKG。
+
+```bash
+./run.sh --list-platforms
+sudo ./run.sh --model NC-1812 /dev/sdX
+# 只下载：无需 root、Docker 或磁盘操作
+./run.sh --model NC-1013 --download-installer ./installers
+./run.sh --model KN-2410 --installer-language en --download-installer ./installers-en
+# Linux 原生模式
+sudo apt install parted e2fsprogs util-linux kpartx curl
+sudo ./run.sh --backend native --model NC-1913 /dev/sdX
+```
+
+Linux 在 Docker 不可用时自动使用系统工具。macOS 自动写入需要 Docker Desktop 和 Python 3；
+检查在选择磁盘之前进行。macOS 无 Docker 时可以下载安装包并使用下方手动流程。
+安装包从 `bin.entware.net` 通过 HTTPS 下载，并在格式化之前检查。
 
 ## 参数
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
-| `ARCH` | 架构：`mipsel`、`mips`、`aarch64` | `mipsel` |
+| `MODEL` | KN-xxxx / NC-xxxx | — |
+| `BACKEND` | auto / docker / native (Linux) | `auto` |
+| `INSTALLER_LANGUAGE` | ru / en | `ru` |
+| `ARCH` | 路由器架构：`mipsel`、`mips`、`aarch64` | 选择型号或平台 |
 | `SWAP_SIZE` | Swap 分区大小（MB） | `1024` |
 | `PARTITION_TABLE` | 分区表类型：`mbr` 或 `gpt` | `mbr` |
 | `SKIP_ENTWARE` | 跳过 Entware 安装器（`1` 为跳过） | `0` |
@@ -113,7 +136,7 @@ sudo SKIP_ENTWARE=1 ./run.sh
 ```bash
 docker run --rm -it --privileged \
   -v /dev/sdb:/dev/target \
-  ghcr.io/maxxxam/keenetic-entware-flash:main
+  ghcr.io/onepyad/keenetic-entware-flash:main
 ```
 
 ## macOS：手动准备（无需 Docker）
@@ -152,7 +175,7 @@ sudo diskutil partitionDisk /dev/disk4 MBRFormat \
 
 ```bash
 diskutil unmountDisk /dev/disk4
-sudo $(brew --prefix e2fsprogs)/sbin/mkfs.ext4 -O ^metadata_csum -L OPKG -F /dev/disk4s2
+sudo $(brew --prefix e2fsprogs)/sbin/mkfs.ext4 -O ^metadata_csum,^64bit -L OPKG -F /dev/disk4s2
 ```
 
 4. 弹出闪存盘：
@@ -498,7 +521,7 @@ diskutil unmountDisk /dev/diskN
 
 **Docker Hub / GHCR 不可用** — 脚本会自动使用可访问的镜像源在本地构建。
 
-**Entware 安装器下载失败** — 闪存盘仍然可以使用。安装器已作为备用方案嵌入 Docker 镜像中。如果备用方案也失败，路由器会在启用 OPKG 时自行下载 Entware。
+**Entware 安装器下载失败** — 格式化之前停止。检查 `bin.entware.net` 的连接并重试；`SKIP_ENTWARE=1` 明确允许不带安装器的准备。
 
 ## 许可证
 

@@ -1,15 +1,17 @@
 # Keenetic Entware Flash
 
-**Подготовка USB-флешки для Entware на Keenetic роутерах — одной командой.**
+**Подготовка USB-флешки для Entware на роутерах Keenetic и Netcraze — одной командой.**
 
 [English](README.md) | [中文](README.zh.md)
+
+Пошаговые команды для проверки на Mac: [TESTING.ru.md](TESTING.ru.md).
 
 ## Быстрый старт
 
 Вставьте USB-флешку и выполните:
 
 ```bash
-git clone https://github.com/MaxXxaM/keenetic-entware-flash.git
+git clone https://github.com/onepyad/keenetic-entware-flash.git
 cd keenetic-entware-flash
 sudo ./run.sh
 ```
@@ -29,7 +31,7 @@ sudo ./run.sh
 Select device [1-2]:
 ```
 
-Docker-образ скачивается автоматически. Если реестр недоступен — собирается локально.
+Docker проверяется до выбора накопителя. На Linux доступна запись без Docker; в режиме Docker образ скачивается или собирается локально.
 
 ## Требования
 
@@ -37,7 +39,7 @@ Docker-образ скачивается автоматически. Если р
 
 | Скрипт | macOS | Linux |
 |--------|-------|-------|
-| `run.sh` (запись флешки) | Docker Desktop | Docker |
+| `run.sh` (запись флешки) | Docker Desktop + Python 3 | Docker **или** `parted`, `e2fsprogs`, `util-linux`, `kpartx` |
 | `clone.sh backup` | встроено (`dd`, `diskutil`) | встроено (`dd`, `lsblk`) |
 | `clone.sh restore` (с авто-расширением) | Docker Desktop | `parted`, `e2fsprogs`, `util-linux`, `kpartx`, `gdisk` |
 | `clone.sh restore --no-expand` | встроено | встроено |
@@ -71,23 +73,62 @@ brew install ddrescue
 # Debian / Ubuntu (и большинство хостов-роутеров)
 sudo apt install docker.io parted e2fsprogs util-linux kpartx gdisk gddrescue
 
-# Docker на Linux опционален: clone.sh расширяет ext4 нативно, если есть parted,
-# e2fsprogs, util-linux и kpartx. Docker используется как fallback / для run.sh.
+# Docker на Linux опционален: run.sh и clone.sh могут использовать системные утилиты.
 ```
 
 ## Поддерживаемые модели
 
-| Архитектура | Модели | `ARCH` |
-|---|---|---|
-| **MIPSEL** (по умолчанию) | Keenetic Ultra, Giga, Viva, Extra, Air, City, Omni, Lite, Start, KN-1010–KN-2310 | `mipsel` |
-| **MIPS** | KN-2410, KN-2510, KN-2010, KN-3610 | `mips` |
-| **AARCH64** | Keenetic Peak, Titan, Hopper, KN-2710, KN-2810, KN-2910, KN-3510 | `aarch64` |
+Выбор платформы выполняется по точному коду модели **KN-xxxx** (Keenetic)
+или **NC-xxxx** (Netcraze). Архитектура компьютера не влияет на выбор установщика.
+Полный проверенный список, ссылки на руководства производителей и архивы:
+[Платформы и установщики](docs/platforms.md).
+
+| Платформа | Keenetic: примеры | Netcraze: подтверждённые модели |
+| --- | --- | --- |
+| `mipsel` | KN-1810, KN-3810, KN-1010/1011 | Viva NC-1913 |
+| `mips` | KN-2410, KN-2510, KN-2010, KN-2110, KN-3610 | Подтверждённых моделей NC в списке нет |
+| `aarch64` | KN-2710, KN-1811/1812, KN-1012, KN-3811/3812 | Giga NC-1012/1013, Ultra NC-1812, Hopper NC-3811, Hopper SE NC-3812, Hopper 4G+ NC-2312, Hopper DSL NC-3611, Hero 5G NC-4110, Titan SE NC-4210 |
+
+Launcher NC-1221 и Carrier NC-1721 имеют USB только для модемов и не подходят
+для установки OPKG на USB-диск. Для неизвестной модели скрипт не назначает
+платформу автоматически: проверьте руководство, затем укажите `--arch`.
+
+```bash
+./run.sh --list-platforms
+sudo ./run.sh --model NC-1812 /dev/sdX
+# Только скачать архив: без sudo, Docker и работы с накопителями
+./run.sh --model NC-1013 --download-installer ./installers
+./run.sh --model KN-2410 --installer-language en --download-installer ./installers-en
+```
+
+### Если Docker не установлен
+
+На Linux скрипт автоматически использует системные утилиты, если Docker CLI
+или daemon недоступны. Для явного выбора используйте `--backend native`.
+
+```bash
+sudo apt install parted e2fsprogs util-linux kpartx curl
+sudo ./run.sh --backend native --model NC-1913 /dev/sdX
+```
+
+На macOS автоматическая запись требует работающего Docker Desktop и Python 3:
+`brew install --cask docker`, `brew install python`, затем запустите Docker Desktop.
+Проверка выполняется до выбора диска. Без Docker можно скачать установщик
+через `--download-installer` и воспользоваться ручной подготовкой ниже.
+`--backend docker` требует Docker и не переключается на другой режим.
+
+Архив скачивается по HTTPS с `bin.entware.net` и проверяется до форматирования.
+Неполный архив или ошибка сети останавливают подготовку. На macOS подтверждение
+стирания запрашивается до теста ёмкости, который тоже записывает данные.
 
 ## Параметры
 
 | Переменная | Описание | По умолчанию |
 |---|---|---|
-| `ARCH` | Архитектура: `mipsel`, `mips`, `aarch64` | `mipsel` |
+| `MODEL` | KN-xxxx / NC-xxxx | — |
+| `BACKEND` | auto / docker / native (Linux) | `auto` |
+| `INSTALLER_LANGUAGE` | ru / en | `ru` |
+| `ARCH` | Архитектура роутера: `mipsel`, `mips`, `aarch64` | Выбор модели/платформы |
 | `SWAP_SIZE` | Размер swap-раздела в МБ | `1024` |
 | `PARTITION_TABLE` | Таблица разделов: `mbr` или `gpt` | `mbr` |
 | `SKIP_ENTWARE` | Пропустить установщик Entware (`1` — пропустить) | `0` |
@@ -114,7 +155,7 @@ sudo SKIP_ENTWARE=1 ./run.sh
 ```bash
 docker run --rm -it --privileged \
   -v /dev/sdb:/dev/target \
-  ghcr.io/maxxxam/keenetic-entware-flash:main
+  ghcr.io/onepyad/keenetic-entware-flash:main
 ```
 
 ## macOS: Ручная подготовка (без Docker)
@@ -153,7 +194,7 @@ sudo diskutil partitionDisk /dev/disk4 MBRFormat \
 
 ```bash
 diskutil unmountDisk /dev/disk4
-sudo $(brew --prefix e2fsprogs)/sbin/mkfs.ext4 -O ^metadata_csum -L OPKG -F /dev/disk4s2
+sudo $(brew --prefix e2fsprogs)/sbin/mkfs.ext4 -O ^metadata_csum,^64bit -L OPKG -F /dev/disk4s2
 ```
 
 4. Извлеките флешку:
@@ -164,7 +205,7 @@ diskutil eject /dev/disk4
 
 5. Вставьте флешку в Keenetic роутер и следуйте шагам из раздела [После записи](#после-записи).
 
-> **Примечание:** SWAP-раздел будет автоматически инициализирован init-скриптом на роутере (`mkswap` + `swapon`). Роутер сам скачает Entware при включении компонента OPKG — требуется подключение к интернету.
+> **Примечание:** SWAP-раздел будет автоматически инициализирован init-скриптом на роутере (`mkswap` + `swapon`). Скачайте установщик через `./run.sh --model KN-xxxx --download-installer` и скопируйте его в папку `install` раздела OPKG по SMB/FTP. Установите компонент OPKG и выберите накопитель в его настройках.
 
 ### Настройки
 
@@ -173,10 +214,10 @@ diskutil eject /dev/disk4
 
 ## Как это работает
 
-1. `run.sh` показывает список USB-устройств и предлагает выбрать
-2. Скачивает готовый Docker-образ (или собирает локально при недоступности)
-3. На macOS создаёт временный образ диска, на Linux пробрасывает устройство напрямую
-4. Контейнер создаёт таблицу разделов MBR/GPT:
+1. `run.sh` предлагает выбрать модель или платформу и проверяет зависимости
+2. Предлагает выбрать USB-устройство и скачивает официальный установщик
+3. На Linux использует системные утилиты или Docker; на macOS создаёт временный образ для Docker
+4. После подтверждения создаёт таблицу разделов MBR/GPT:
    - **Раздел 1** — SWAP
    - **Раздел 2** — EXT4 (метка: OPKG) с установщиком Entware
 5. На macOS записывает образ на флешку (пропуская пустые блоки для скорости)
@@ -501,7 +542,7 @@ diskutil unmountDisk /dev/diskN
 
 **Docker Hub / GHCR недоступен** — скрипт автоматически соберёт образ локально через доступные зеркала.
 
-**Установщик Entware не скачался** — флешка всё равно готова. Установщик зашит в Docker-образ как fallback. Если и он не сработал — роутер скачает Entware сам при включении OPKG.
+**Установщик Entware не скачался** — подготовка останавливается до форматирования. Проверьте доступ к `bin.entware.net` и повторите запуск. `SKIP_ENTWARE=1` явно разрешает подготовку без установщика.
 
 ## Лицензия
 
