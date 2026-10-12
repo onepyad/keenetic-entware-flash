@@ -14,7 +14,7 @@ test_preparation() (
     mkdir -p "$INSTALLER_SOURCE"
     printf 'fixture' > "$INSTALLER_SOURCE/aarch64-installer.tar.gz"
     PYTHON_BIN=mock_python MKFS_EXT4=mock_mkfs DEBUGFS_BIN=mock_debugfs
-    TRACE="$TMP_TEST/trace-${FAIL_STEP:-success}"
+    TRACE="$TMP_TEST/trace-${FAIL_STEP:-success}-${BUSY_VOLUME:-0}"
     step() {
         printf '%s\n' "$1" >> "$TRACE"
         [ "${FAIL_STEP:-}" != "$1" ]
@@ -24,7 +24,15 @@ test_preparation() (
             partitionDisk)
                 [ "$*" = "partitionDisk /dev/disk7 MBRFormat MS-DOS FAT32 SWAP 1073741824B MS-DOS FAT32 OPKG R" ] || fail "wrong swap partition size"
                 step partition ;;
-            unmountDisk) step unmount ;;
+            unmountDisk)
+                if [ "${2:-}" = force ]; then
+                    [ "$3" = /dev/disk7 ] || fail "wrong forced unmount target"
+                    step force-unmount
+                else
+                    [ "$2" = /dev/disk7 ] || fail "wrong unmount target"
+                    step unmount || return 1
+                    [ "${BUSY_VOLUME:-0}" != 1 ]
+                fi ;;
             info) [ "$3" = /dev/disk7s1 ] || fail "wrong partition queried"; echo '<unused/>' ;;
             eject) step eject ;;
             *) fail "unexpected diskutil invocation" ;;
@@ -61,7 +69,11 @@ test_preparation() (
     sync() { step sync; }
     if [ -z "${FAIL_STEP:-}" ]; then
         prepare_usb_macos >/dev/null
-        [ "$(cat "$TRACE")" = $'partition\nunmount\nswap\next4\nfiles\nmbr\nsync\neject' ] || fail "incorrect preparation order"
+        expected=$'partition\nunmount\nswap\next4\nfiles\nmbr\nsync\neject'
+        if [ "${BUSY_VOLUME:-0}" = 1 ]; then
+            expected=$'partition\nunmount\nforce-unmount\nswap\next4\nfiles\nmbr\nsync\neject'
+        fi
+        [ "$(cat "$TRACE")" = "$expected" ] || fail "incorrect preparation order"
         [ -f "$INSTALLER_SOURCE/aarch64-installer.tar.gz" ] || fail "user installer was removed"
     else
         if prepare_usb_macos >/dev/null 2>&1; then fail "failure suppressed: $FAIL_STEP"; fi
@@ -71,7 +83,9 @@ test_preparation() (
 )
 
 test_preparation
-for failure in partition unmount swap ext4 files mbr eject; do
+BUSY_VOLUME=1 test_preparation
+BUSY_VOLUME=1 FAIL_STEP=force-unmount test_preparation
+for failure in partition swap ext4 files mbr eject; do
     FAIL_STEP="$failure" test_preparation
 done
 echo "native macOS preparation tests passed"

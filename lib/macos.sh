@@ -51,7 +51,12 @@ prepare_usb_macos() {
     diskutil partitionDisk "$DISK" MBRFormat \
         'MS-DOS FAT32' SWAP "${MAC_SWAP_BYTES}B" \
         'MS-DOS FAT32' OPKG R || return 1
-    diskutil unmountDisk "$DISK" || return 1
+    # These volumes were just erased after explicit user confirmation. Spotlight
+    # can hold the temporary FAT volumes open; force only this selected disk.
+    if ! diskutil unmountDisk "$DISK"; then
+        echo ">>> macOS удерживает новый раздел: повторяем отключение выбранной флешки." >&2
+        diskutil unmountDisk force "$DISK" || return 1
+    fi
     swap_size=$(diskutil info -plist "${DISK}s1" | plutil -extract TotalSize raw -) || return 1
     [ "$swap_size" = "$MAC_SWAP_BYTES" ] || {
         echo "ERROR: Actual swap partition size differs from requested size." >&2; return 1;
