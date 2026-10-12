@@ -125,9 +125,17 @@ validate_target() {
         fi
     else
         [[ "$DISK" =~ ^/dev/disk[0-9]+$ ]] || { echo "ERROR: Use a whole disk such as /dev/disk4." >&2; return 1; }
-        local whole internal
-        whole=$(diskutil info -plist "$DISK" | plutil -extract Whole raw -) || return 1
-        internal=$(diskutil info -plist "$DISK" | plutil -extract Internal raw -) || return 1
+        local whole internal info
+        info=$(diskutil info -plist "$DISK") || return 1
+        whole=$(printf '%s\n' "$info" | plutil -extract WholeDisk raw - 2>/dev/null) ||
+            whole=$(printf '%s\n' "$info" | plutil -extract Whole raw - 2>/dev/null) || {
+                echo "ERROR: diskutil did not identify whether $DISK is a whole disk. No data was written." >&2
+                return 1
+            }
+        internal=$(printf '%s\n' "$info" | plutil -extract Internal raw - 2>/dev/null) || {
+            echo "ERROR: diskutil did not identify whether $DISK is external. No data was written." >&2
+            return 1
+        }
         [ "$whole" = true ] && [ "$internal" = false ] || {
             echo "ERROR: Select an external whole disk." >&2; return 1;
         }

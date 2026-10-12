@@ -19,5 +19,6 @@ jobs:
           bash tests/test_usb.sh
           bash tests/test_setup_macos.sh
           bash tests/test_macos_prepare.sh
+          bash tests/test_macos_info.sh
           bash tests/test_swap.sh
           python3 tests/test_macos_disk.py
